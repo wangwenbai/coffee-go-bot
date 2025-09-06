@@ -41,7 +41,6 @@ bot.on("message", async ctx => {
   const userId = getUserId(ctx.from.id);
 
   try {
-    // 删除原消息
     await ctx.deleteMessage();
   } catch (err) {
     console.log("删除消息失败:", err.message);
@@ -92,7 +91,7 @@ bot.on("message", async ctx => {
   }
 });
 
-// 命令查看自己历史消息
+// 私聊查看历史消息
 bot.command("history", async ctx => {
   const userId = getUserId(ctx.from.id);
   const history = userHistory.get(ctx.from.id) || [];
@@ -103,12 +102,26 @@ bot.command("history", async ctx => {
   }
 });
 
-// Render 部署监听端口
+// Render Webhook 部署
 const port = process.env.PORT || 3000;
-bot.start({
-  onStart: () => console.log(`Bot started on port ${port}`),
-  webhook: {
-    domain: "https://你的render域名.onrender.com",
-    port: parseInt(port)
+const domain = process.env.RENDER_EXTERNAL_URL || "https://你的render域名.onrender.com";
+
+// 清理旧 webhook
+(async () => {
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+    console.log("旧 webhook 已删除");
+  } catch (err) {
+    console.log("删除 webhook 失败:", err.message);
   }
-});
+
+  // 启动 webhook
+  bot.start({
+    webhook: {
+      domain,
+      port: parseInt(port)
+    }
+  });
+
+  console.log(`Bot started on webhook ${domain}:${port}`);
+})();
