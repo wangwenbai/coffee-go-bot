@@ -42,3 +42,13 @@ bot.on("message", async (ctx) => {
       if (msg.voice) {
         await ctx.api.sendVoice(GROUP_ID, msg.voice.file_id, {
           caption: `匿名#${anonId} 🎤 语音消息`,
+        });
+      }
+
+    } catch (err) {
+      console.error("处理消息失败:", err);
+    }
+  }
+});
+
+bot.start();
