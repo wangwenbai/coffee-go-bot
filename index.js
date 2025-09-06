@@ -1,12 +1,6 @@
 require('dotenv').config();
 const { Bot } = require('grammy');
-const { Low, JSONFile } = require('lowdb');
 const { nanoid } = require('nanoid');
-
-// 初始化数据库
-const adapter = new JSONFile('db.json');
-const db = new Low(adapter);
-db.data = db.data || { users: {}, messages: {} };
 
 // 读取环境变量
 const bot = new Bot(process.env.BOT_TOKEN);
@@ -22,8 +16,6 @@ bot.on('message', async (ctx) => {
   if (!tempId) {
     tempId = nanoid(6);
     tempIds[userId] = tempId;
-    db.data.users[tempId] = { userId };
-    await db.write();
   }
 
   const msgText = ctx.message.text || '📎 文件/媒体';
