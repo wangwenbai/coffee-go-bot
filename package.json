@@ -7,9 +7,9 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "grammy": "^3.35.0"
+    "grammy": "3.37.0"
   },
   "engines": {
-    "node": "18.x"
+    "node": "20.x"
   }
 }
