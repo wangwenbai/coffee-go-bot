@@ -12,7 +12,6 @@
   "dependencies": {
     "grammy": "3.34.3",
     "dotenv": "^16.3.1",
-    "lowdb": "^6.0.1",
     "nanoid": "^4.0.2"
   }
 }
