@@ -3,45 +3,38 @@ const { Bot } = require('grammy');
 const { Low, JSONFile } = require('lowdb');
 const { nanoid } = require('nanoid');
 
-// 数据库初始化
+// 初始化数据库
 const adapter = new JSONFile('db.json');
 const db = new Low(adapter);
-await db.read();
-db.data ||= { users: {}, messages: [] };
+db.data = db.data || { users: {}, messages: {} };
 
-// 初始化 Bot
+// 读取环境变量
 const bot = new Bot(process.env.BOT_TOKEN);
-const TARGET_GROUP = process.env.GROUP_ID;
+const GROUP_ID = process.env.GROUP_ID;
 
-// /start 命令
-bot.command('start', ctx => {
-  ctx.reply('欢迎来到 COFFEE·GO 匿名群消息转发机器人！✅');
-});
+// 临时编号映射
+const tempIds = {};
 
-// 所有消息处理
-bot.on('message', async ctx => {
+// 用户发送消息时处理
+bot.on('message', async (ctx) => {
   const userId = ctx.from.id;
-  
-  // 为用户分配临时编号
-  if (!db.data.users[userId]) {
-    db.data.users[userId] = { id: userId, code: nanoid(6) };
+  let tempId = tempIds[userId];
+  if (!tempId) {
+    tempId = nanoid(6);
+    tempIds[userId] = tempId;
+    db.data.users[tempId] = { userId };
     await db.write();
   }
-  const userCode = db.data.users[userId].code;
 
-  // 只处理群消息
-  if (ctx.chat.type.endsWith('group')) {
-    // 删除原消息
-    try { await ctx.deleteMessage(); } catch(e) {}
+  const msgText = ctx.message.text || '📎 文件/媒体';
+  await ctx.deleteMessage(); // 删除用户原消息
 
-    // 转发匿名消息
-    const text = ctx.message.text || '📄 发送了非文本消息';
-    await bot.api.sendMessage(TARGET_GROUP, `用户 #${userCode}:\n${text}`);
-    
-    // 记录消息
-    db.data.messages.push({ code: userCode, text, date: new Date().toISOString() });
-    await db.write();
-  }
+  // 转发到群组
+  await ctx.api.sendMessage(
+    GROUP_ID,
+    `编号 ${tempId} 的匿名消息：\n${msgText}`
+  );
 });
 
 bot.start();
+console.log('Bot started...');
