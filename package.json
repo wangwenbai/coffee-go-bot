@@ -1,15 +1,16 @@
 {
   "name": "coffee-go-bot",
   "version": "1.0.0",
-  "description": "Telegram anonymous forwarding bot for COFFEE·GO",
+  "description": "Telegram bot for COFFEE·GO",
   "main": "index.js",
+  "engines": {
+    "node": "18.x"
+  },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "grammy": "^3.40.0"
-  },
-  "engines": {
-    "node": "20.x"
+    "grammy": "3.39.1",
+    "dotenv": "^16.3.1"
   }
 }
