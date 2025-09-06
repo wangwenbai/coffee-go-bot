@@ -48,44 +48,43 @@ bot.on("message", async ctx => {
   }
 
   try {
-    let sentMessage;
     if (message.text) {
-      sentMessage = await ctx.api.sendMessage(chatId, `【${userId}】: ${message.text}`);
+      await ctx.api.sendMessage(chatId, `【${userId}】: ${message.text}`);
       saveUserMessage(userId, message.text);
     } else if (message.photo) {
       const photo = message.photo[message.photo.length - 1].file_id;
-      sentMessage = await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】` });
+      await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】` });
       saveUserMessage(userId, "[照片]");
     } else if (message.sticker) {
-      sentMessage = await ctx.api.sendSticker(chatId, message.sticker.file_id);
+      await ctx.api.sendSticker(chatId, message.sticker.file_id);
       saveUserMessage(userId, "[贴纸]");
     } else if (message.video) {
-      sentMessage = await ctx.api.sendVideo(chatId, message.video.file_id, { caption: `【${userId}】` });
+      await ctx.api.sendVideo(chatId, message.video.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[视频]");
     } else if (message.document) {
-      sentMessage = await ctx.api.sendDocument(chatId, message.document.file_id, { caption: `【${userId}】` });
+      await ctx.api.sendDocument(chatId, message.document.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[文件]");
     } else if (message.audio) {
-      sentMessage = await ctx.api.sendAudio(chatId, message.audio.file_id, { caption: `【${userId}】` });
+      await ctx.api.sendAudio(chatId, message.audio.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[音频]");
     } else if (message.voice) {
-      sentMessage = await ctx.api.sendVoice(chatId, message.voice.file_id, { caption: `【${userId}】` });
+      await ctx.api.sendVoice(chatId, message.voice.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[语音]");
     } else if (message.animation) {
-      sentMessage = await ctx.api.sendAnimation(chatId, message.animation.file_id, { caption: `【${userId}】` });
+      await ctx.api.sendAnimation(chatId, message.animation.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[动画]");
     } else if (message.location) {
-      sentMessage = await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${message.location.latitude}, ${message.location.longitude}]`);
+      await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${message.location.latitude}, ${message.location.longitude}]`);
       saveUserMessage(userId, "[位置]");
     } else if (message.poll) {
       const poll = message.poll;
-      sentMessage = await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), {
+      await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), {
         type: poll.type,
         is_anonymous: true
       });
       saveUserMessage(userId, "[投票]");
     } else {
-      sentMessage = await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`);
+      await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`);
       saveUserMessage(userId, "[未知消息类型]");
     }
   } catch (err) {
@@ -104,7 +103,7 @@ bot.command("history", async ctx => {
   }
 });
 
-// Render 部署需要监听端口
+// Render 部署监听端口
 const port = process.env.PORT || 3000;
 bot.start({
   onStart: () => console.log(`Bot started on port ${port}`),
