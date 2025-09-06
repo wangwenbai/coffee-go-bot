@@ -1,5 +1,6 @@
-import { Bot } from "grammy";
+import { Bot, webhookCallback } from "grammy";
 import dotenv from "dotenv";
+import express from "express";
 
 dotenv.config();
 
@@ -11,11 +12,8 @@ const prefix = process.env.NICK_PREFIX || "User-";
 // 用户编号映射
 const userMap = new Map();
 let userCounter = 1;
-
-// 用户消息历史记录
 const userHistory = new Map();
 
-// 获取用户编号
 function getUserId(userId) {
   if (!userMap.has(userId)) {
     userMap.set(userId, `${prefix}${userCounter}`);
@@ -24,20 +22,15 @@ function getUserId(userId) {
   return userMap.get(userId);
 }
 
-// 记录用户消息
-function saveUserMessage(userId, messageSummary) {
-  if (!userHistory.has(userId)) {
-    userHistory.set(userId, []);
-  }
-  userHistory.get(userId).push(messageSummary);
+function saveUserMessage(userId, msg) {
+  if (!userHistory.has(userId)) userHistory.set(userId, []);
+  userHistory.get(userId).push(msg);
 }
 
-// 处理所有消息类型
+// 处理消息
 bot.on("message", async ctx => {
-  const message = ctx.message;
-
-  if (ctx.from.is_bot) return; // 忽略机器人自己
-
+  const msg = ctx.message;
+  if (ctx.from.is_bot) return;
   const userId = getUserId(ctx.from.id);
 
   try {
@@ -47,36 +40,36 @@ bot.on("message", async ctx => {
   }
 
   try {
-    if (message.text) {
-      await ctx.api.sendMessage(chatId, `【${userId}】: ${message.text}`);
-      saveUserMessage(userId, message.text);
-    } else if (message.photo) {
-      const photo = message.photo[message.photo.length - 1].file_id;
+    if (msg.text) {
+      await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`);
+      saveUserMessage(userId, msg.text);
+    } else if (msg.photo) {
+      const photo = msg.photo[msg.photo.length - 1].file_id;
       await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】` });
       saveUserMessage(userId, "[照片]");
-    } else if (message.sticker) {
-      await ctx.api.sendSticker(chatId, message.sticker.file_id);
+    } else if (msg.sticker) {
+      await ctx.api.sendSticker(chatId, msg.sticker.file_id);
       saveUserMessage(userId, "[贴纸]");
-    } else if (message.video) {
-      await ctx.api.sendVideo(chatId, message.video.file_id, { caption: `【${userId}】` });
+    } else if (msg.video) {
+      await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[视频]");
-    } else if (message.document) {
-      await ctx.api.sendDocument(chatId, message.document.file_id, { caption: `【${userId}】` });
+    } else if (msg.document) {
+      await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[文件]");
-    } else if (message.audio) {
-      await ctx.api.sendAudio(chatId, message.audio.file_id, { caption: `【${userId}】` });
+    } else if (msg.audio) {
+      await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[音频]");
-    } else if (message.voice) {
-      await ctx.api.sendVoice(chatId, message.voice.file_id, { caption: `【${userId}】` });
+    } else if (msg.voice) {
+      await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[语音]");
-    } else if (message.animation) {
-      await ctx.api.sendAnimation(chatId, message.animation.file_id, { caption: `【${userId}】` });
+    } else if (msg.animation) {
+      await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】` });
       saveUserMessage(userId, "[动画]");
-    } else if (message.location) {
-      await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${message.location.latitude}, ${message.location.longitude}]`);
+    } else if (msg.location) {
+      await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`);
       saveUserMessage(userId, "[位置]");
-    } else if (message.poll) {
-      const poll = message.poll;
+    } else if (msg.poll) {
+      const poll = msg.poll;
       await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), {
         type: poll.type,
         is_anonymous: true
@@ -91,37 +84,35 @@ bot.on("message", async ctx => {
   }
 });
 
-// 私聊查看历史消息
+// 私聊查看历史
 bot.command("history", async ctx => {
   const userId = getUserId(ctx.from.id);
   const history = userHistory.get(ctx.from.id) || [];
-  if (history.length === 0) {
-    await ctx.reply("你还没有发送过消息。");
-  } else {
-    await ctx.reply("你的消息历史:\n" + history.join("\n"));
-  }
+  if (!history.length) return ctx.reply("你还没有发送过消息。");
+  ctx.reply("你的消息历史:\n" + history.join("\n"));
 });
 
-// Render Webhook 部署
+// Express 显式绑定端口
+const app = express();
 const port = process.env.PORT || 3000;
-const domain = process.env.RENDER_EXTERNAL_URL || "https://你的render域名.onrender.com";
 
-// 清理旧 webhook
-(async () => {
+// Webhook 路径
+const webhookPath = `/bot${process.env.BOT_TOKEN}`;
+app.use(express.json());
+app.post(webhookPath, webhookCallback(bot, "express"));
+
+// Render 根路径
+app.get("/", (req, res) => res.send("Bot is running"));
+
+// 启动服务
+app.listen(port, async () => {
+  console.log(`Server listening on port ${port}`);
+  const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}${webhookPath}`;
   try {
     await bot.api.deleteWebhook({ drop_pending_updates: true });
-    console.log("旧 webhook 已删除");
+    await bot.api.setWebhook(webhookUrl);
+    console.log(`Webhook set to ${webhookUrl}`);
   } catch (err) {
-    console.log("删除 webhook 失败:", err.message);
+    console.log("设置 webhook 失败:", err.message);
   }
-
-  // 启动 webhook
-  bot.start({
-    webhook: {
-      domain,
-      port: parseInt(port)
-    }
-  });
-
-  console.log(`Bot started on webhook ${domain}:${port}`);
-})();
+});
