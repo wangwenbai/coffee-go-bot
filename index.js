@@ -3,11 +3,10 @@ import { Bot } from "grammy";
 const bot = new Bot(process.env.BOT_TOKEN); // 从环境变量读取 Bot Token
 const GROUP_ID = Number(process.env.GROUP_ID); // 从环境变量读取群组 ID
 
-// 用户映射表：真实用户ID → 匿名编号
+// 用户匿名映射表
 const userMap = new Map();
 let counter = 1;
 
-// 获取用户匿名编号
 function getAnonId(userId) {
   if (!userMap.has(userId)) {
     userMap.set(userId, counter++);
@@ -46,7 +45,7 @@ bot.on("message", async (ctx) => {
       }
 
     } catch (err) {
-      console.error("处理消息失败:", err);
+      console.error("消息处理失败:", err);
     }
   }
 });
