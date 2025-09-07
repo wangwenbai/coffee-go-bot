@@ -5,18 +5,25 @@ import express from "express";
 
 dotenv.config();
 
+// ---------------------
+// Bot 初始化
+// ---------------------
 const bot = new Bot(process.env.BOT_TOKEN);
+await bot.init();
+
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User-";
 
-const userMap = new Map();
-const userHistory = new Map();
-const messageMap = new Map();
-const pendingMessages = new Map();
+const userMap = new Map();          // telegramId => 匿名编号
+const userHistory = new Map();      // 匿名编号 => 历史消息
+const messageMap = new Map();       // 原始消息ID => 转发消息ID
+const pendingMessages = new Map();  // 待审核消息 { ctx, userId, notifMsgIds }
 
+// ---------------------
+// 屏蔽词逻辑
+// ---------------------
 let blockedKeywords = [];
 
-// Load blocked keywords
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
@@ -29,7 +36,11 @@ function loadBlockedKeywords() {
 loadBlockedKeywords();
 fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
 
+// ---------------------
+// 工具函数
+// ---------------------
 function generateRandomId() { return Math.floor(10000 + Math.random() * 90000); }
+
 function getUserId(userId) {
   if (!userMap.has(userId)) userMap.set(userId, `${prefix}${generateRandomId()}`);
   return userMap.get(userId);
@@ -53,6 +64,9 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
+// ---------------------
+// 消息转发函数
+// ---------------------
 async function forwardMessage(ctx, userId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
@@ -76,48 +90,53 @@ async function forwardMessage(ctx, userId, replyTargetId = null) {
   }
 }
 
-// Handle group messages
+// ---------------------
+// 群消息处理
+// ---------------------
 bot.on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
   const userId = getUserId(ctx.from.id);
 
-  // Delete original message
+  // 删除原消息
   try { await ctx.deleteMessage(); } catch {}
 
-  // Blocked keyword
+  // 屏蔽词
   if (msg.text && containsBlockedKeyword(msg.text)) return;
 
-  // Messages with link or @ mention → private review
+  // 含链接/@ → 私聊管理员审核
   if (msg.text && containsLinkOrMention(msg.text)) {
     try {
       const admins = await bot.api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
 
+      const notifMsgIds = [];
       for (const admin of adminUsers) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-
-        await bot.api.sendMessage(admin.user.id,
+        const sentMsg = await bot.api.sendMessage(admin.user.id,
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${msg.text || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
+        notifMsgIds.push(sentMsg.message_id);
       }
 
-      pendingMessages.set(msg.message_id, { ctx, userId });
+      pendingMessages.set(msg.message_id, { ctx, userId, notifMsgIds });
     } catch (err) {
       console.log("Failed to send private review:", err.message);
     }
-    return; // Do not forward yet
+    return; // 不匿名转发
   }
 
-  // Normal message → anonymous forward
+  // 普通消息 → 匿名转发
   forwardMessage(ctx, userId);
 });
 
-// Callback query for approve/reject
+// ---------------------
+// 回调查询（审核按钮）
+// ---------------------
 bot.on("callback_query:data", async ctx => {
   const userIdClicker = ctx.from.id;
   const member = await bot.api.getChatMember(chatId, userIdClicker);
@@ -133,17 +152,32 @@ bot.on("callback_query:data", async ctx => {
   const pending = pendingMessages.get(origMsgId);
   if (!pending) return ctx.answerCallbackQuery({ text: "Already handled or not found", show_alert: true });
 
-  if (action === "approve") {
-    forwardMessage(pending.ctx, pending.userId);
+  try {
+    if (action === "approve") {
+      await forwardMessage(pending.ctx, pending.userId);
+      await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
+    } else if (action === "reject") {
+      await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
+    }
+
+    // 删除管理员私聊通知消息
+    for (const notifId of pending.notifMsgIds) {
+      for (const admin of await bot.api.getChatAdministrators(chatId)) {
+        if (!admin.user.is_bot) {
+          try { await bot.api.deleteMessage(admin.user.id, notifId); } catch {}
+        }
+      }
+    }
+
     pendingMessages.delete(origMsgId);
-    await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
-  } else if (action === "reject") {
-    pendingMessages.delete(origMsgId);
-    await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
+  } catch (err) {
+    console.log("Error handling callback:", err.message);
   }
 });
 
-// User left → clean mapping
+// ---------------------
+// 用户退群清理
+// ---------------------
 bot.on("chat_member", async ctx => {
   const status = ctx.chatMember.new_chat_member.status;
   const userId = ctx.chatMember.new_chat_member.user.id;
@@ -154,13 +188,17 @@ bot.on("chat_member", async ctx => {
   }
 });
 
-// Start bot with webhook (Render)
+// ---------------------
+// Express Webhook (Render)
+// ---------------------
 const app = express();
 const port = process.env.PORT || 3000;
 const webhookPath = `/bot${process.env.BOT_TOKEN}`;
+
 app.use(express.json());
-app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body); res.sendStatus(200); });
+app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
 app.get("/", (req, res) => res.send("Bot running"));
+
 app.listen(port, async () => {
   console.log(`Listening on port ${port}`);
   if (!process.env.RENDER_EXTERNAL_URL) return;
