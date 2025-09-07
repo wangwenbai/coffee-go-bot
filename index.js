@@ -13,8 +13,6 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();
 const userHistory = new Map();
 const messageMap = new Map();
-
-// 待管理员审核消息
 const pendingMessages = new Map();
 
 // 屏蔽关键词
@@ -146,20 +144,22 @@ bot.on("message", async ctx => {
     return;
   }
 
-  // 链接/@ 用户消息 → 待管理员审核
+  // 链接/@ 用户消息 → 待管理员审核（群内@所有管理员）
   if (msg.text && containsLinkOrMention(msg.text)) {
     const admins = await bot.api.getChatAdministrators(chatId);
-    for (const admin of admins) {
-      if (!admin.user.is_bot) {
-        const keyboard = new InlineKeyboard()
-          .text("✅ 同意", `approve:${msg.message_id}:${ctx.from.id}`)
-          .text("❌ 拒绝", `reject:${msg.message_id}:${ctx.from.id}`);
-        await bot.api.sendMessage(admin.user.id,
-          `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户，请审核：\n${msg.text}`,
-          { reply_markup: keyboard }
-        );
-      }
-    }
+    const adminMentions = admins
+      .filter(a => !a.user.is_bot)
+      .map(a => `@${a.user.username || a.user.first_name}`)
+      .join(' ');
+
+    const keyboard = new InlineKeyboard()
+      .text("✅ 同意", `approve:${msg.message_id}:${ctx.from.id}`)
+      .text("❌ 拒绝", `reject:${msg.message_id}:${ctx.from.id}`);
+
+    await ctx.api.sendMessage(chatId,
+      `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户，请管理员审核：\n${msg.text}\n${adminMentions}`,
+      { reply_markup: keyboard }
+    );
     pendingMessages.set(msg.message_id, { ctx, userId, replyTargetId });
     return; // 审核前不转发
   }
@@ -170,17 +170,21 @@ bot.on("message", async ctx => {
 
 // 回调按钮处理
 bot.on("callback_query:data", async ctx => {
-  const [action, msgId, userId] = ctx.callbackQuery.data.split(":");
-  const pending = pendingMessages.get(Number(msgId));
-  if (!pending) return ctx.answerCallbackQuery({ text: "消息不存在或已处理" });
+  const data = ctx.callbackQuery.data.split(":");
+  const action = data[0];
+  const msgId = parseInt(data[1]);
+  const userId = data[2];
+
+  const pending = pendingMessages.get(msgId);
+  if (!pending) return ctx.answerCallbackQuery({ text: "消息不存在或已处理", show_alert: true });
 
   if (action === "approve") {
     await forwardMessage(pending.ctx, pending.userId, pending.replyTargetId);
-    pendingMessages.delete(Number(msgId));
-    await ctx.answerCallbackQuery({ text: "已同意转发" });
+    pendingMessages.delete(msgId);
+    await ctx.answerCallbackQuery({ text: "已同意转发", show_alert: true });
   } else if (action === "reject") {
-    pendingMessages.delete(Number(msgId));
-    await ctx.answerCallbackQuery({ text: "已拒绝转发" });
+    pendingMessages.delete(msgId);
+    await ctx.answerCallbackQuery({ text: "已拒绝转发", show_alert: true });
   }
 });
 
