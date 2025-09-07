@@ -13,7 +13,7 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();
 const userHistory = new Map();
 
-// 消息映射：原始消息 ID → 群里机器人消息 ID
+// 消息映射：原始消息 ID（用户发的） → 群里机器人消息 ID
 const messageMap = new Map();
 
 // 随机生成 5 位数字编号
@@ -40,6 +40,7 @@ bot.on("message", async ctx => {
   if (ctx.from.is_bot) return;
   const userId = getUserId(ctx.from.id);
 
+  // 删除原始消息
   try {
     await ctx.deleteMessage();
   } catch (err) {
@@ -130,7 +131,7 @@ bot.on("message", async ctx => {
       saveUserMessage(userId, "[未知消息类型]");
     }
 
-    // 保存消息映射
+    // 保存消息映射（关键：用户原始 message_id → 机器人发送的消息 ID）
     if (sent) {
       messageMap.set(msg.message_id, sent.message_id);
     }
