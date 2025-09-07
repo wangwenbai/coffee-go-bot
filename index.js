@@ -71,17 +71,19 @@ async function forwardMessage(ctx, userId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
   try {
-    if (msg.text) sent = await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.photo) sent = await ctx.api.sendPhoto(chatId, msg.photo[msg.photo.length - 1].file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    // 文本 + 媒体都支持
+    const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】: ${msg.text}` : `【${userId}】`;
+
+    if (msg.photo) sent = await ctx.api.sendPhoto(chatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.video) sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.document) sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.audio) sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.voice) sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.animation) sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.sticker) sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.video) sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.document) sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.audio) sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.voice) sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.animation) sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
     else if (msg.location) sent = await ctx.api.sendMessage(chatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
     else if (msg.poll) sent = await ctx.api.sendPoll(chatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-    else sent = await ctx.api.sendMessage(chatId, `【${userId}】 sent unsupported message type`, { reply_to_message_id: replyTargetId || undefined });
+    else sent = await ctx.api.sendMessage(chatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || "[Non-text]");
@@ -97,12 +99,16 @@ bot.on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
+  const member = await bot.api.getChatMember(chatId, ctx.from.id);
+  const isAdmin = member.status === "administrator" || member.status === "creator";
+  if (isAdmin) return; // 管理员消息不匿名，不检查屏蔽词
+
   const userId = getUserId(ctx.from.id);
 
   // 删除原消息
   try { await ctx.deleteMessage(); } catch {}
 
-  // 屏蔽词
+  // 屏蔽词检查（普通用户）
   if (msg.text && containsBlockedKeyword(msg.text)) return;
 
   // 含链接/@ → 私聊管理员审核
@@ -127,7 +133,7 @@ bot.on("message", async ctx => {
     return; // 不匿名转发
   }
 
-  // 普通消息 → 匿名转发
+  // 普通消息 → 匿名转发（保留文字+媒体）
   forwardMessage(ctx, userId);
 });
 
