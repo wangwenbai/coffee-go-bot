@@ -86,7 +86,7 @@ async function forwardMessage(ctx, userId, replyTargetId = null) {
     else sent = await ctx.api.sendMessage(chatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
-    saveUserMessage(userId, msg.text || "[Non-text]");
+    saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
   } catch (err) {
     console.log("Forward message error:", err.message);
   }
@@ -109,10 +109,11 @@ bot.on("message", async ctx => {
   try { await ctx.deleteMessage(); } catch {}
 
   // 屏蔽词检查（普通用户）
-  if (msg.text && containsBlockedKeyword(msg.text)) return;
+  const textToCheck = msg.text || msg.caption;
+  if (containsBlockedKeyword(textToCheck)) return;
 
   // 含链接/@ → 私聊管理员审核
-  if (msg.text && containsLinkOrMention(msg.text)) {
+  if (containsLinkOrMention(textToCheck)) {
     try {
       const admins = await bot.api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -122,7 +123,7 @@ bot.on("message", async ctx => {
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
         const sentMsg = await bot.api.sendMessage(admin.user.id,
-          `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${msg.text || "[Non-text]"}\nApprove to forward or reject.`,
+          `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
         pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
