@@ -6,21 +6,18 @@ import fs from "fs";
 dotenv.config();
 
 const bot = new Bot(process.env.BOT_TOKEN);
-
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User-";
 
 // 用户编号映射
 const userMap = new Map();
 const userHistory = new Map();
-
-// 消息映射：原始消息 ID → 群里机器人消息 ID
 const messageMap = new Map();
 
-// 屏蔽关键词数组
+// 屏蔽关键词
 let blockedKeywords = [];
 
-// 加载屏蔽词
+// 加载 blocked.txt
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
@@ -36,7 +33,7 @@ fs.watchFile('./blocked.txt', () => {
   loadBlockedKeywords();
 });
 
-// 生成 5 位编号
+// 生成 5 位随机编号
 function generateRandomId() {
   return Math.floor(10000 + Math.random() * 90000);
 }
@@ -59,17 +56,6 @@ function containsBlockedKeyword(text) {
   if (!text) return false;
   const lowerText = text.toLowerCase();
   return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
-}
-
-// 判断用户是否群管理员
-async function isAdminInGroup(userId) {
-  try {
-    const member = await bot.api.getChatMember(chatId, userId);
-    return member.status === "administrator" || member.status === "creator";
-  } catch (err) {
-    console.log("检查管理员失败:", err.message);
-    return false;
-  }
 }
 
 // 群消息处理
@@ -135,87 +121,6 @@ bot.on("message", async ctx => {
   } catch (err) {
     console.log("转发消息失败:", err.message);
   }
-});
-
-// 私聊 /start
-bot.command("start", async ctx => {
-  if (ctx.chat.type !== "private") return;
-  ctx.reply("欢迎使用匿名管理机器人，你可以私聊我管理屏蔽词、查看历史消息等功能。");
-});
-
-// 私聊查看历史
-bot.command("history", async ctx => {
-  if (ctx.chat.type !== "private") return;
-  const history = userHistory.get(ctx.from.id) || [];
-  if (!history.length) return ctx.reply("你还没有发送过消息。");
-  ctx.reply("你的消息历史:\n" + history.join("\n"));
-});
-
-// 私聊添加屏蔽词
-bot.command("block", async ctx => {
-  if (ctx.chat.type !== "private") return;
-  if (!(await isAdminInGroup(ctx.from.id))) return ctx.reply("只有群管理员可以添加屏蔽词。");
-
-  const parts = ctx.message.text.split(" ");
-  if (parts.length < 2) return ctx.reply("请在命令后指定要屏蔽的词，例如: /block spam,scam,freegift");
-  const text = parts.slice(1).join(" ").trim();
-
-  const words = text.split(",").map(w => w.trim()).filter(Boolean);
-  if (!words.length) return ctx.reply("没有有效屏蔽词。");
-
-  const added = [];
-  for (const word of words) {
-    if (!blockedKeywords.includes(word)) {
-      blockedKeywords.push(word);
-      added.push(word);
-    }
-  }
-
-  try {
-    if (added.length) {
-      fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-      ctx.reply(`屏蔽词已添加: ${added.join(", ")}`);
-    } else ctx.reply("这些词已在屏蔽列表中。");
-  } catch (err) {
-    console.log("写入屏蔽词文件失败:", err.message);
-    ctx.reply("添加失败，请稍后重试。");
-  }
-});
-
-// 私聊移除屏蔽词
-bot.command("unblock", async ctx => {
-  if (ctx.chat.type !== "private") return;
-  if (!(await isAdminInGroup(ctx.from.id))) return ctx.reply("只有群管理员可以移除屏蔽词。");
-
-  const parts = ctx.message.text.split(" ");
-  if (parts.length < 2) return ctx.reply("请在命令后指定要移除的词，例如: /unblock spam,scam");
-  const text = parts.slice(1).join(" ").trim();
-
-  const words = text.split(",").map(w => w.trim()).filter(Boolean);
-  if (!words.length) return ctx.reply("没有有效屏蔽词。");
-
-  const removed = [];
-  blockedKeywords = blockedKeywords.filter(word => {
-    if (words.includes(word)) { removed.push(word); return false; }
-    return true;
-  });
-
-  try {
-    if (removed.length) {
-      fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-      ctx.reply(`屏蔽词已移除: ${removed.join(", ")}`);
-    } else ctx.reply("这些词不在屏蔽列表中。");
-  } catch (err) {
-    console.log("写入屏蔽词文件失败:", err.message);
-    ctx.reply("移除失败，请稍后重试。");
-  }
-});
-
-// 私聊查看屏蔽词
-bot.command("blocked", async ctx => {
-  if (ctx.chat.type !== "private") return;
-  if (!blockedKeywords.length) return ctx.reply("当前没有屏蔽词。");
-  ctx.reply(`当前屏蔽词: ${blockedKeywords.join(", ")}`);
 });
 
 // 用户退群清理
