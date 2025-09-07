@@ -14,16 +14,28 @@ await bot.init();
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User-";
 
-// 安全读取管理员 ID，避免未定义报错
-const adminIds = (process.env.ADMIN_IDS || "")
-  .split(",")
-  .map(id => id.trim())
-  .filter(Boolean);
-
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
+
+let adminIds = [];
+
+// ---------------------
+// 自动获取群管理员 ID
+// ---------------------
+async function loadAdmins() {
+  try {
+    const admins = await bot.api.getChatAdministrators(chatId);
+    adminIds = admins.filter(a => !a.user.is_bot).map(a => a.user.id);
+    console.log(`Loaded ${adminIds.length} admins:`, adminIds);
+  } catch (err) {
+    console.error("Failed to load admins:", err.message);
+  }
+}
+
+await loadAdmins();
+setInterval(loadAdmins, 60 * 1000); // 每分钟刷新一次
 
 // ---------------------
 // 屏蔽词逻辑
@@ -110,32 +122,34 @@ bot.on("message", async ctx => {
 
   const userId = getUserId(ctx.from.id);
 
+  // 删除原消息
   try { await ctx.deleteMessage(); } catch {}
 
+  // 屏蔽词检查（普通用户）
   const textToCheck = msg.text || msg.caption;
   if (containsBlockedKeyword(textToCheck)) return;
 
+  // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
+    if (adminIds.length === 0) return;
     try {
-      const admins = await bot.api.getChatAdministrators(chatId);
-      const adminUsers = admins.filter(a => !a.user.is_bot);
-
-      for (const admin of adminUsers) {
+      for (const adminId of adminIds) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-        const sentMsg = await bot.api.sendMessage(admin.user.id,
+        const sentMsg = await bot.api.sendMessage(adminId,
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
-        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
+        pendingMessages.set(`${msg.message_id}:${adminId}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: adminId });
       }
     } catch (err) {
       console.log("Failed to send private review:", err.message);
     }
-    return;
+    return; // 不匿名转发
   }
 
+  // 普通消息 → 匿名转发（保留文字+媒体）
   forwardMessage(ctx, userId);
 });
 
@@ -144,8 +158,7 @@ bot.on("message", async ctx => {
 // ---------------------
 bot.on("callback_query:data", async ctx => {
   const userIdClicker = ctx.from.id;
-  const member = await bot.api.getChatMember(chatId, userIdClicker);
-  if (!(member.status === "administrator" || member.status === "creator")) {
+  if (!adminIds.includes(userIdClicker)) {
     return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
   }
 
@@ -169,6 +182,7 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
+    // 🔹 编辑所有管理员的通知消息为已处理
     for (const key of pendingKeys) {
       const pending = pendingMessages.get(key);
       try {
