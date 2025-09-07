@@ -11,13 +11,20 @@ const prefix = process.env.NICK_PREFIX || "User-";
 
 // 用户编号映射
 const userMap = new Map();
-let userCounter = 1;
 const userHistory = new Map();
+
+// 消息映射：原始消息 ID → 群里机器人消息 ID
+const messageMap = new Map();
+
+// 随机生成 5 位数字编号
+function generateRandomId() {
+  return Math.floor(10000 + Math.random() * 90000); // 10000 - 99999
+}
 
 function getUserId(userId) {
   if (!userMap.has(userId)) {
-    userMap.set(userId, `${prefix}${userCounter}`);
-    userCounter++;
+    const randomId = generateRandomId();
+    userMap.set(userId, `${prefix}${randomId}`);
   }
   return userMap.get(userId);
 }
@@ -39,45 +46,93 @@ bot.on("message", async ctx => {
     console.log("删除消息失败:", err.message);
   }
 
+  // 判断是否是回复消息
+  let replyTargetId = null;
+  if (msg.reply_to_message) {
+    const repliedMsgId = msg.reply_to_message.message_id;
+    replyTargetId = messageMap.get(repliedMsgId) || null;
+  }
+
   try {
+    let sent;
+
     if (msg.text) {
-      await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`);
+      sent = await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`, {
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, msg.text);
     } else if (msg.photo) {
       const photo = msg.photo[msg.photo.length - 1].file_id;
-      await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】` });
+      sent = await ctx.api.sendPhoto(chatId, photo, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[照片]");
     } else if (msg.sticker) {
-      await ctx.api.sendSticker(chatId, msg.sticker.file_id);
+      sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, {
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[贴纸]");
     } else if (msg.video) {
-      await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】` });
+      sent = await ctx.api.sendVideo(chatId, msg.video.file_id, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[视频]");
     } else if (msg.document) {
-      await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】` });
+      sent = await ctx.api.sendDocument(chatId, msg.document.file_id, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[文件]");
     } else if (msg.audio) {
-      await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】` });
+      sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[音频]");
     } else if (msg.voice) {
-      await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】` });
+      sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[语音]");
     } else if (msg.animation) {
-      await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】` });
+      sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, {
+        caption: `【${userId}】`,
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[动画]");
     } else if (msg.location) {
-      await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`);
+      sent = await ctx.api.sendMessage(
+        chatId,
+        `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`,
+        { reply_to_message_id: replyTargetId || undefined }
+      );
       saveUserMessage(userId, "[位置]");
     } else if (msg.poll) {
       const poll = msg.poll;
-      await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), {
-        type: poll.type,
-        is_anonymous: true
-      });
+      sent = await ctx.api.sendPoll(
+        chatId,
+        poll.question,
+        poll.options.map(o => o.text),
+        {
+          type: poll.type,
+          is_anonymous: true,
+          reply_to_message_id: replyTargetId || undefined,
+        }
+      );
       saveUserMessage(userId, "[投票]");
     } else {
-      await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`);
+      sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`, {
+        reply_to_message_id: replyTargetId || undefined,
+      });
       saveUserMessage(userId, "[未知消息类型]");
+    }
+
+    // 保存消息映射
+    if (sent) {
+      messageMap.set(msg.message_id, sent.message_id);
     }
   } catch (err) {
     console.log("转发消息失败:", err.message);
