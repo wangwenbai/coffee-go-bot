@@ -17,7 +17,7 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // 待审核消息 { ctx, userId, notifMsgIds }
+const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId }
 
 // ---------------------
 // 屏蔽词逻辑
@@ -111,7 +111,6 @@ bot.on("message", async ctx => {
       const admins = await bot.api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
 
-      const notifMsgIds = [];
       for (const admin of adminUsers) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
@@ -120,10 +119,8 @@ bot.on("message", async ctx => {
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${msg.text || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
-        notifMsgIds.push(sentMsg.message_id);
+        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id });
       }
-
-      pendingMessages.set(msg.message_id, { ctx, userId, notifMsgIds });
     } catch (err) {
       console.log("Failed to send private review:", err.message);
     }
@@ -149,8 +146,9 @@ bot.on("callback_query:data", async ctx => {
   const origMsgId = parseInt(data[1]);
   const origUserId = parseInt(data[2]);
 
-  const pending = pendingMessages.get(origMsgId);
-  if (!pending) return ctx.answerCallbackQuery({ text: "Already handled or not found", show_alert: true });
+  const key = `${origMsgId}:${userIdClicker}`;
+  const pending = pendingMessages.get(key);
+  if (!pending) return ctx.answerCallbackQuery({ text: "This message has been handled", show_alert: true });
 
   try {
     if (action === "approve") {
@@ -160,16 +158,10 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 删除管理员私聊通知消息
-    for (const notifId of pending.notifMsgIds) {
-      for (const admin of await bot.api.getChatAdministrators(chatId)) {
-        if (!admin.user.is_bot) {
-          try { await bot.api.deleteMessage(admin.user.id, notifId); } catch {}
-        }
-      }
-    }
+    // 删除私聊通知消息
+    try { await ctx.api.deleteMessage(ctx.chat.id, pending.notifMsgId); } catch {}
 
-    pendingMessages.delete(origMsgId);
+    pendingMessages.delete(key);
   } catch (err) {
     console.log("Error handling callback:", err.message);
   }
