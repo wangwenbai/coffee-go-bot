@@ -23,14 +23,14 @@ function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
     blockedKeywords = data.split(',').map(word => word.trim()).filter(Boolean);
-    console.log(`屏蔽词已加载: ${blockedKeywords.length} 个`);
+    console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
-    console.log("加载屏蔽词失败:", err.message);
+    console.log("Failed to load blocked keywords:", err.message);
   }
 }
 loadBlockedKeywords();
 fs.watchFile('./blocked.txt', () => {
-  console.log('blocked.txt 文件变化，重新加载...');
+  console.log('blocked.txt changed, reloading...');
   loadBlockedKeywords();
 });
 
@@ -65,7 +65,7 @@ async function isAdminMessage(userId) {
     const member = await bot.api.getChatMember(chatId, userId);
     return member.status === "administrator" || member.status === "creator";
   } catch (err) {
-    console.log("检查管理员失败:", err.message);
+    console.log("Check admin failed:", err.message);
     return false;
   }
 }
@@ -88,35 +88,35 @@ async function forwardMessage(ctx, userId, replyTargetId = null) {
   } else if (msg.photo) {
     const photo = msg.photo[msg.photo.length - 1].file_id;
     sent = await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[照片]");
+    saveUserMessage(userId, "[Photo]");
   } else if (msg.sticker) {
     sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[贴纸]");
+    saveUserMessage(userId, "[Sticker]");
   } else if (msg.video) {
     sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[视频]");
+    saveUserMessage(userId, "[Video]");
   } else if (msg.document) {
     sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[文件]");
+    saveUserMessage(userId, "[Document]");
   } else if (msg.audio) {
     sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[音频]");
+    saveUserMessage(userId, "[Audio]");
   } else if (msg.voice) {
     sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[语音]");
+    saveUserMessage(userId, "[Voice]");
   } else if (msg.animation) {
     sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[动画]");
+    saveUserMessage(userId, "[Animation]");
   } else if (msg.location) {
-    sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[位置]");
+    sent = await ctx.api.sendMessage(chatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[Location]");
   } else if (msg.poll) {
     const poll = msg.poll;
     sent = await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), { type: poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[投票]");
+    saveUserMessage(userId, "[Poll]");
   } else {
-    sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`, { reply_to_message_id: replyTargetId || undefined });
-    saveUserMessage(userId, "[未知消息类型]");
+    sent = await ctx.api.sendMessage(chatId, `【${userId}】 sent unsupported message type`, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[Unsupported]");
   }
 
   if (sent) messageMap.set(msg.message_id, sent.message_id);
@@ -140,7 +140,7 @@ bot.on("message", async ctx => {
   try { await ctx.deleteMessage(); } catch {}
 
   if (msg.text && containsBlockedKeyword(msg.text)) {
-    saveUserMessage(userId, "[屏蔽消息]");
+    saveUserMessage(userId, "[Blocked message]");
     return;
   }
 
@@ -153,11 +153,11 @@ bot.on("message", async ctx => {
       .join(' ');
 
     const keyboard = new InlineKeyboard()
-      .text("✅ 同意", `approve:${msg.message_id}:${ctx.from.id}`)
-      .text("❌ 拒绝", `reject:${msg.message_id}:${ctx.from.id}`);
+      .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
+      .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
 
     await ctx.api.sendMessage(chatId,
-      `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户，请管理员审核：\n${msg.text}\n${adminMentions}`,
+      `User ${ctx.from.first_name} (${userId}) sent a link or @ mention. Admins, please review:\n${msg.text}\n${adminMentions}`,
       { reply_markup: keyboard }
     );
     pendingMessages.set(msg.message_id, { ctx, userId, replyTargetId });
@@ -176,15 +176,15 @@ bot.on("callback_query:data", async ctx => {
   const userId = data[2];
 
   const pending = pendingMessages.get(msgId);
-  if (!pending) return ctx.answerCallbackQuery({ text: "消息不存在或已处理", show_alert: true });
+  if (!pending) return ctx.answerCallbackQuery({ text: "Message not found or already handled", show_alert: true });
 
   if (action === "approve") {
     await forwardMessage(pending.ctx, pending.userId, pending.replyTargetId);
     pendingMessages.delete(msgId);
-    await ctx.answerCallbackQuery({ text: "已同意转发", show_alert: true });
+    await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
   } else if (action === "reject") {
     pendingMessages.delete(msgId);
-    await ctx.answerCallbackQuery({ text: "已拒绝转发", show_alert: true });
+    await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
   }
 });
 
@@ -195,7 +195,7 @@ bot.on("chat_member", async ctx => {
   if (status === "left" || status === "kicked") {
     userMap.delete(userId);
     userHistory.delete(userId);
-    console.log(`已移除用户 ${userId} 的匿名编号`);
+    console.log(`Removed anonymous ID for user ${userId}`);
   }
 });
 
@@ -216,6 +216,6 @@ app.listen(port, async () => {
     await bot.api.setWebhook(webhookUrl);
     console.log(`Webhook set to ${webhookUrl}`);
   } catch (err) {
-    console.log("设置 webhook 失败:", err.message);
+    console.log("Failed to set webhook:", err.message);
   }
 });
