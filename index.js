@@ -35,7 +35,7 @@ function loadBlockedKeywords() {
 loadBlockedKeywords();
 
 // 热更新 blocked.txt
-fs.watchFile('./blocked.txt', (curr, prev) => {
+fs.watchFile('./blocked.txt', () => {
   console.log('blocked.txt 文件发生变化，重新加载...');
   loadBlockedKeywords();
 });
@@ -191,21 +191,23 @@ bot.on("message", async ctx => {
 
 // 私聊查看历史
 bot.command("history", async ctx => {
+  if (ctx.chat.type !== "private") return;
   const userId = getUserId(ctx.from.id);
   const history = userHistory.get(ctx.from.id) || [];
   if (!history.length) return ctx.reply("你还没有发送过消息。");
   ctx.reply("你的消息历史:\n" + history.join("\n"));
 });
 
-// 添加屏蔽词（管理员命令）- 支持英文逗号批量添加 - 私聊反馈
+// 私聊添加屏蔽词
 bot.command("block", async ctx => {
-  if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以添加屏蔽词。");
+  if (ctx.chat.type !== "private") return; // 仅私聊
+  if (!(await isAdmin(ctx))) return ctx.reply("只有管理员可以添加屏蔽词。");
 
-  const text = ctx.message.text.slice(6).trim(); // 去掉 "/block "
-  if (!text) return ctx.api.sendMessage(ctx.from.id, "请指定要屏蔽的词。");
+  const text = ctx.message.text.slice(6).trim();
+  if (!text) return ctx.reply("请指定要屏蔽的词。");
 
-  const words = text.split(",").map(word => word.trim()).filter(Boolean);
-  if (!words.length) return ctx.api.sendMessage(ctx.from.id, "没有有效屏蔽词。");
+  const words = text.split(",").map(w => w.trim()).filter(Boolean);
+  if (!words.length) return ctx.reply("没有有效屏蔽词。");
 
   let added = [];
   for (const word of words) {
@@ -217,21 +219,22 @@ bot.command("block", async ctx => {
 
   if (added.length) {
     fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-    await ctx.api.sendMessage(ctx.from.id, `屏蔽词已添加: ${added.join(", ")}`);
+    ctx.reply(`屏蔽词已添加: ${added.join(", ")}`);
   } else {
-    await ctx.api.sendMessage(ctx.from.id, "这些词已在屏蔽列表中。");
+    ctx.reply("这些词已在屏蔽列表中。");
   }
 });
 
-// 移除屏蔽词（管理员命令）- 支持英文逗号批量删除 - 私聊反馈
+// 私聊移除屏蔽词
 bot.command("unblock", async ctx => {
-  if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以移除屏蔽词。");
+  if (ctx.chat.type !== "private") return; // 仅私聊
+  if (!(await isAdmin(ctx))) return ctx.reply("只有管理员可以移除屏蔽词。");
 
-  const text = ctx.message.text.slice(8).trim(); // 去掉 "/unblock "
-  if (!text) return ctx.api.sendMessage(ctx.from.id, "请指定要移除的词。");
+  const text = ctx.message.text.slice(8).trim();
+  if (!text) return ctx.reply("请指定要移除的词。");
 
-  const words = text.split(",").map(word => word.trim()).filter(Boolean);
-  if (!words.length) return ctx.api.sendMessage(ctx.from.id, "没有有效屏蔽词。");
+  const words = text.split(",").map(w => w.trim()).filter(Boolean);
+  if (!words.length) return ctx.reply("没有有效屏蔽词。");
 
   let removed = [];
   blockedKeywords = blockedKeywords.filter(word => {
@@ -244,16 +247,17 @@ bot.command("unblock", async ctx => {
 
   if (removed.length) {
     fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-    await ctx.api.sendMessage(ctx.from.id, `屏蔽词已移除: ${removed.join(", ")}`);
+    ctx.reply(`屏蔽词已移除: ${removed.join(", ")}`);
   } else {
-    await ctx.api.sendMessage(ctx.from.id, "这些词不在屏蔽列表中。");
+    ctx.reply("这些词不在屏蔽列表中。");
   }
 });
 
-// 查看当前屏蔽词 - 私聊反馈
+// 私聊查看屏蔽词
 bot.command("blocked", async ctx => {
-  if (!blockedKeywords.length) return ctx.api.sendMessage(ctx.from.id, "当前没有屏蔽词。");
-  await ctx.api.sendMessage(ctx.from.id, `当前屏蔽词: ${blockedKeywords.join(", ")}`);
+  if (ctx.chat.type !== "private") return;
+  if (!blockedKeywords.length) return ctx.reply("当前没有屏蔽词。");
+  ctx.reply(`当前屏蔽词: ${blockedKeywords.join(", ")}`);
 });
 
 // 监听用户退群
