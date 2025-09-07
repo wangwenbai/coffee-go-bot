@@ -146,26 +146,37 @@ bot.on("callback_query:data", async ctx => {
   const origMsgId = parseInt(data[1]);
   const origUserId = parseInt(data[2]);
 
-  const key = `${origMsgId}:${userIdClicker}`;
-  const pending = pendingMessages.get(key);
-  if (!pending) return ctx.answerCallbackQuery({ text: "This message has been handled", show_alert: true });
+  // 查找所有管理员收到的 pending 通知
+  const pendingKeys = Array.from(pendingMessages.keys())
+    .filter(key => key.startsWith(`${origMsgId}:`));
+
+  if (pendingKeys.length === 0) {
+    return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
+  }
 
   try {
     if (action === "approve") {
-      await forwardMessage(pending.ctx, pending.userId);
+      await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
       await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
     } else if (action === "reject") {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 🔹 修改通知消息文本，而不是删除
-    try {
-      await ctx.api.editMessageText(ctx.chat.id, pending.notifMsgId, `✅ Message processed`);
-    } catch (err) {
-      console.log("Failed to edit notification message:", err.message);
+    // 🔹 编辑所有管理员的通知消息
+    for (const key of pendingKeys) {
+      const pending = pendingMessages.get(key);
+      try {
+        await ctx.api.editMessageText(pending.ctx.from.id, pending.notifMsgId,
+          `✅ Message processed`, {
+            reply_markup: new InlineKeyboard().text("✅ Processed", "processed")
+          }
+        );
+      } catch (err) {
+        console.log("Failed to edit notification message:", err.message);
+      }
+      pendingMessages.delete(key);
     }
 
-    pendingMessages.delete(key);
   } catch (err) {
     console.log("Error handling callback:", err.message);
   }
