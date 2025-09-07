@@ -150,6 +150,18 @@ bot.command("history", async ctx => {
   ctx.reply("你的消息历史:\n" + history.join("\n"));
 });
 
+// 监听用户退群，删除编号映射
+bot.on("chat_member", async ctx => {
+  const status = ctx.chatMember.new_chat_member.status;
+  const userId = ctx.chatMember.new_chat_member.user.id;
+
+  if (status === "left" || status === "kicked") {
+    userMap.delete(userId);
+    userHistory.delete(userId);
+    console.log(`已移除用户 ${userId} 的匿名编号`);
+  }
+});
+
 // Express 显式绑定端口
 const app = express();
 const port = process.env.PORT || 3000;
