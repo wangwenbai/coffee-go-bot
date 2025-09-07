@@ -80,19 +80,24 @@ async function isAdmin(ctx) {
 // 处理所有消息
 bot.on("message", async ctx => {
   const msg = ctx.message;
+
+  // 1. 私聊消息直接跳过匿名转发逻辑
+  if (ctx.chat.type === "private") return; 
+
+  // 2. 机器人消息不处理
   if (ctx.from.is_bot) return;
+
   const userId = getUserId(ctx.from.id);
 
-  // 删除原始消息
+  // 删除群里的原始消息
   try {
     await ctx.deleteMessage();
   } catch (err) {
     console.log("删除消息失败:", err.message);
   }
 
-  // 屏蔽关键词
-  if ((msg.text && containsBlockedKeyword(msg.text))) {
-    console.log(`消息被屏蔽: ${msg.text}`);
+  // 屏蔽关键词检测
+  if (msg.text && containsBlockedKeyword(msg.text)) {
     saveUserMessage(userId, "[屏蔽消息]");
     return;
   }
@@ -189,6 +194,12 @@ bot.on("message", async ctx => {
   }
 });
 
+// 私聊 /start
+bot.command("start", async ctx => {
+  if (ctx.chat.type !== "private") return;
+  ctx.reply("欢迎使用匿名管理机器人，你可以私聊我管理屏蔽词、查看历史消息等功能。");
+});
+
 // 私聊查看历史
 bot.command("history", async ctx => {
   if (ctx.chat.type !== "private") return;
@@ -200,7 +211,7 @@ bot.command("history", async ctx => {
 
 // 私聊添加屏蔽词
 bot.command("block", async ctx => {
-  if (ctx.chat.type !== "private") return; // 仅私聊
+  if (ctx.chat.type !== "private") return; 
   if (!(await isAdmin(ctx))) return ctx.reply("只有管理员可以添加屏蔽词。");
 
   const text = ctx.message.text.slice(6).trim();
@@ -227,7 +238,7 @@ bot.command("block", async ctx => {
 
 // 私聊移除屏蔽词
 bot.command("unblock", async ctx => {
-  if (ctx.chat.type !== "private") return; // 仅私聊
+  if (ctx.chat.type !== "private") return; 
   if (!(await isAdmin(ctx))) return ctx.reply("只有管理员可以移除屏蔽词。");
 
   const text = ctx.message.text.slice(8).trim();
@@ -274,13 +285,9 @@ bot.on("chat_member", async ctx => {
 // Express 显式绑定端口
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Webhook 路径
 const webhookPath = `/bot${process.env.BOT_TOKEN}`;
 app.use(express.json());
 app.post(webhookPath, webhookCallback(bot, "express"));
-
-// Render 根路径
 app.get("/", (req, res) => res.send("Bot is running"));
 
 // 启动服务
