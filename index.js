@@ -3,7 +3,6 @@ import fs from "fs";
 import { Bot, InlineKeyboard } from "grammy";
 import path from "path";
 
-// 读取配置
 const TOKEN = process.env.BOT_TOKEN;
 const GROUP_ID = process.env.GROUP_ID;
 const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map((id) => id.trim());
@@ -13,7 +12,7 @@ const bot = new Bot(TOKEN);
 // 保存用户编号映射
 const userMap = new Map();
 
-// 屏蔽词文件路径
+// 屏蔽词文件
 const BLOCKED_FILE = path.resolve("blocked.txt");
 let blockedWords = [];
 
@@ -26,8 +25,6 @@ function loadBlockedWords() {
       .map((w) => w.trim().toLowerCase())
       .filter(Boolean);
     console.log("Blocked keywords loaded:", blockedWords.length);
-  } else {
-    console.log("No blocked.txt found, skipping load.");
   }
 }
 loadBlockedWords();
@@ -47,36 +44,38 @@ function getAnonId(userId) {
   return userMap.get(userId);
 }
 
-// 检查是否触及屏蔽词
+// 屏蔽词检测
 function containsBlockedWord(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
   return blockedWords.some((w) => lower.includes(w));
 }
 
-// 检查是否包含链接或 @
+// 链接/@检测
 function containsLinkOrMention(text) {
   if (!text) return false;
   return /(https?:\/\/|www\.)/.test(text) || /@[\w_]+/.test(text);
 }
 
-// 处理用户消息
+// 消息处理
 bot.on("message", async (ctx) => {
   const msg = ctx.message;
 
-  // 跳过频道推送的消息（保留评论按钮）
+  // 1. 跳过频道推送消息（保留评论按钮）
   if (msg.is_automatic_forward) {
     return;
   }
 
-  // 群管理员消息 -> 不删除、不匿名
+  // 2. 管理员消息 -> 不删除、不匿名
   const member = await ctx.getChatMember(ctx.from.id);
   if (["creator", "administrator"].includes(member.status)) {
     return;
   }
 
-  // 检查屏蔽词
+  // 3. 普通用户消息
   const text = msg.text || msg.caption || "";
+
+  // 屏蔽词
   if (containsBlockedWord(text)) {
     try {
       await ctx.deleteMessage();
@@ -84,14 +83,13 @@ bot.on("message", async (ctx) => {
     return;
   }
 
-  // 检查链接/@ -> 进入审核流程
+  // 链接/@ 审核
   if (containsLinkOrMention(text)) {
     try {
       await ctx.deleteMessage();
     } catch {}
     const anonId = getAnonId(ctx.from.id);
 
-    // 给管理员发送审核请求
     for (const adminId of ADMIN_IDS) {
       try {
         const keyboard = new InlineKeyboard()
@@ -104,21 +102,20 @@ bot.on("message", async (ctx) => {
           { reply_markup: keyboard }
         );
       } catch (err) {
-        console.error("Failed to notify admin", err.message);
+        console.error("Notify admin failed", err.message);
       }
     }
     return;
   }
 
-  // 普通消息 -> 匿名转发
+  // 匿名转发普通消息
   try {
     await ctx.deleteMessage();
   } catch {}
   const anonId = getAnonId(ctx.from.id);
 
-  // 处理多媒体+文字
   if (msg.photo) {
-    await bot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
+    await bot.api.sendPhoto(GROUP_ID, msg.photo.at(-1).file_id, {
       caption: `${anonId}: ${msg.caption || ""}`,
     });
   } else if (msg.video) {
@@ -150,9 +147,9 @@ bot.on("message", async (ctx) => {
   }
 });
 
-// 处理管理员审核按钮
+// 管理员审核按钮
 bot.on("callback_query:data", async (ctx) => {
-  const [action, chatId, userId, msgId] = ctx.callbackQuery.data.split(":");
+  const [action, chatId, userId] = ctx.callbackQuery.data.split(":");
   const fromId = String(ctx.from.id);
 
   if (!ADMIN_IDS.includes(fromId)) {
@@ -160,10 +157,9 @@ bot.on("callback_query:data", async (ctx) => {
   }
 
   const anonId = getAnonId(userId);
+  const originalText = ctx.callbackQuery.message.text.split("\n\n")[1] || "";
 
   if (action === "approve") {
-    // 审核通过 -> 匿名转发
-    const originalText = ctx.callbackQuery.message.text.split("\n\n")[1] || "";
     await bot.api.sendMessage(chatId, `${anonId}: ${originalText}`);
     await ctx.editMessageText(`✅ Processed: ${originalText}`, {
       reply_markup: new InlineKeyboard().text("Processed"),
