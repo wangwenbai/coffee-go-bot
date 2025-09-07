@@ -168,7 +168,7 @@ bot.on("message", async ctx => {
   forwardMessage(ctx, userId, replyTargetId);
 });
 
-// 回调按钮处理（仅管理员可操作）
+// 回调按钮处理（仅管理员可操作，点击后删除审核通知）
 bot.on("callback_query:data", async ctx => {
   const userIdClicker = ctx.from.id;
   const member = await bot.api.getChatMember(chatId, userIdClicker);
@@ -181,6 +181,13 @@ bot.on("callback_query:data", async ctx => {
   const msgId = parseInt(data[1]);
   const pending = pendingMessages.get(msgId);
   if (!pending) return ctx.answerCallbackQuery({ text: "Message not found or already handled", show_alert: true });
+
+  try {
+    // 删除审核通知
+    await ctx.api.deleteMessage(ctx.callbackQuery.message.message_id);
+  } catch (err) {
+    console.log("Failed to delete review message:", err.message);
+  }
 
   if (action === "approve") {
     await forwardMessage(pending.ctx, pending.userId, pending.replyTargetId);
