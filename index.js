@@ -19,24 +19,6 @@ const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 
-let adminIds = [];
-
-// ---------------------
-// 自动获取群管理员 ID
-// ---------------------
-async function loadAdmins() {
-  try {
-    const admins = await bot.api.getChatAdministrators(chatId);
-    adminIds = admins.filter(a => !a.user.is_bot).map(a => a.user.id);
-    console.log(`Loaded ${adminIds.length} admins:`, adminIds);
-  } catch (err) {
-    console.error("Failed to load admins:", err.message);
-  }
-}
-
-await loadAdmins();
-setInterval(loadAdmins, 60 * 1000); // 每分钟刷新一次
-
 // ---------------------
 // 屏蔽词逻辑
 // ---------------------
@@ -118,39 +100,46 @@ bot.on("message", async ctx => {
 
   const member = await bot.api.getChatMember(chatId, ctx.from.id);
   const isAdmin = member.status === "administrator" || member.status === "creator";
-  if (isAdmin) return; // 管理员消息不匿名，不检查屏蔽词
+  const isChannelMsg = !!msg.sender_chat && msg.sender_chat.type === "channel";
+
+  // 管理员消息或频道消息直接显示，不删除
+  if (isAdmin || isChannelMsg) return;
 
   const userId = getUserId(ctx.from.id);
-
-  // 删除原消息
-  try { await ctx.deleteMessage(); } catch {}
-
-  // 屏蔽词检查（普通用户）
   const textToCheck = msg.text || msg.caption;
-  if (containsBlockedKeyword(textToCheck)) return;
+
+  // 屏蔽词检查
+  if (containsBlockedKeyword(textToCheck)) {
+    try { await ctx.deleteMessage(); } catch {}
+    return;
+  }
 
   // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
-    if (adminIds.length === 0) return;
     try {
-      for (const adminId of adminIds) {
+      const admins = await bot.api.getChatAdministrators(chatId);
+      const adminUsers = admins.filter(a => !a.user.is_bot);
+
+      for (const admin of adminUsers) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-        const sentMsg = await bot.api.sendMessage(adminId,
+        const sentMsg = await bot.api.sendMessage(admin.user.id,
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
-        pendingMessages.set(`${msg.message_id}:${adminId}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: adminId });
+        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
       }
     } catch (err) {
       console.log("Failed to send private review:", err.message);
     }
-    return; // 不匿名转发
+    try { await ctx.deleteMessage(); } catch {}
+    return;
   }
 
-  // 普通消息 → 匿名转发（保留文字+媒体）
+  // 普通消息 → 匿名转发
   forwardMessage(ctx, userId);
+  try { await ctx.deleteMessage(); } catch {}
 });
 
 // ---------------------
@@ -158,7 +147,8 @@ bot.on("message", async ctx => {
 // ---------------------
 bot.on("callback_query:data", async ctx => {
   const userIdClicker = ctx.from.id;
-  if (!adminIds.includes(userIdClicker)) {
+  const member = await bot.api.getChatMember(chatId, userIdClicker);
+  if (!(member.status === "administrator" || member.status === "creator")) {
     return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
   }
 
@@ -167,8 +157,7 @@ bot.on("callback_query:data", async ctx => {
   const origMsgId = parseInt(data[1]);
   const origUserId = parseInt(data[2]);
 
-  const pendingKeys = Array.from(pendingMessages.keys())
-    .filter(key => key.startsWith(`${origMsgId}:`));
+  const pendingKeys = Array.from(pendingMessages.keys()).filter(key => key.startsWith(`${origMsgId}:`));
 
   if (pendingKeys.length === 0) {
     return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
@@ -182,7 +171,7 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 🔹 编辑所有管理员的通知消息为已处理
+    // 编辑所有管理员的通知消息为已处理
     for (const key of pendingKeys) {
       const pending = pendingMessages.get(key);
       try {
