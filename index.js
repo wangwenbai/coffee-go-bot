@@ -58,10 +58,24 @@ function containsBlockedKeyword(text) {
   return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
 }
 
+// 判断是否管理员消息
+async function isAdminMessage(userId) {
+  try {
+    const member = await bot.api.getChatMember(chatId, userId);
+    return member.status === "administrator" || member.status === "creator";
+  } catch (err) {
+    console.log("检查管理员失败:", err.message);
+    return false;
+  }
+}
+
 // 群消息处理
 bot.on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.chat.type === "private" || ctx.from.is_bot) return;
+
+  // 管理员消息直接显示
+  if (await isAdminMessage(ctx.from.id)) return;
 
   const userId = getUserId(ctx.from.id);
   try { await ctx.deleteMessage(); } catch {}
@@ -79,7 +93,6 @@ bot.on("message", async ctx => {
 
   try {
     let sent;
-
     if (msg.text) {
       sent = await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`, { reply_to_message_id: replyTargetId || undefined });
       saveUserMessage(userId, msg.text);
