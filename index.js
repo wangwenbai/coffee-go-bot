@@ -158,8 +158,12 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 删除私聊通知消息
-    try { await ctx.api.deleteMessage(ctx.chat.id, pending.notifMsgId); } catch {}
+    // 🔹 修改通知消息文本，而不是删除
+    try {
+      await ctx.api.editMessageText(ctx.chat.id, pending.notifMsgId, `✅ Message processed`);
+    } catch (err) {
+      console.log("Failed to edit notification message:", err.message);
+    }
 
     pendingMessages.delete(key);
   } catch (err) {
