@@ -156,11 +156,12 @@ bot.on("message", async ctx => {
       .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
       .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
 
-    await ctx.api.sendMessage(chatId,
+    const notifMsg = await ctx.api.sendMessage(chatId,
       `User ${ctx.from.first_name} (${userId}) sent a link or @ mention. Admins, please review:\n${msg.text}\n${adminMentions}`,
       { reply_markup: keyboard }
     );
-    pendingMessages.set(msg.message_id, { ctx, userId, replyTargetId });
+
+    pendingMessages.set(msg.message_id, { ctx, userId, replyTargetId, notifMsgId: notifMsg.message_id });
     return; // 审核前不转发
   }
 
@@ -183,8 +184,8 @@ bot.on("callback_query:data", async ctx => {
   if (!pending) return ctx.answerCallbackQuery({ text: "Message not found or already handled", show_alert: true });
 
   try {
-    // 删除审核通知
-    await ctx.api.deleteMessage(ctx.callbackQuery.message.message_id);
+    // 删除审核通知消息
+    await ctx.api.deleteMessage(pending.notifMsgId);
   } catch (err) {
     console.log("Failed to delete review message:", err.message);
   }
