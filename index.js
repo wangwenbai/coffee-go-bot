@@ -19,6 +19,10 @@ const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 
+// NEW: 恶意广告计数与已通知集合（避免重复通知）
+const adCountMap = new Map();       // telegramId => 广告次数
+const notifiedUsers = new Set();    // telegramId（已触发过通知的用户）
+
 // ---------------------
 // 屏蔽词逻辑
 // ---------------------
@@ -62,6 +66,28 @@ function containsLinkOrMention(text) {
   const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/i;
   const mentionRegex = /@[a-zA-Z0-9_]+/;
   return urlRegex.test(text) || mentionRegex.test(text);
+}
+
+// NEW: 超过阈值后私聊所有管理员的通知函数
+async function notifyAdminsOfSpammer(ctx, count, anonId) {
+  try {
+    const admins = await bot.api.getChatAdministrators(chatId);
+    const adminUsers = admins.filter(a => !a.user.is_bot);
+    const username = ctx.from.username ? `@${ctx.from.username}` : "(no username)";
+    const text = [
+      "🚨 Ad-Spam Alert",
+      `User: ${username}`,
+      `Telegram ID: ${ctx.from.id}`,
+      `Anon ID: ${anonId}`,
+      `Detected Ad Attempts: ${count}`,
+      `Action: Please review this member.`
+    ].join("\n");
+    for (const admin of adminUsers) {
+      await bot.api.sendMessage(admin.user.id, text);
+    }
+  } catch (err) {
+    console.log("Failed to notify admins:", err.message);
+  }
 }
 
 // ---------------------
@@ -109,11 +135,25 @@ bot.on("message", async ctx => {
   // 删除普通用户消息
   try { await ctx.deleteMessage(); } catch {}
 
-  // 屏蔽词检查
+  // NEW: 统计恶意广告（含链接/@ 或 命中屏蔽词）
   const textToCheck = msg.text || msg.caption;
+  const isAdAttempt = containsLinkOrMention(textToCheck) || containsBlockedKeyword(textToCheck);
+  if (isAdAttempt) {
+    const prev = adCountMap.get(ctx.from.id) || 0;
+    const next = prev + 1;
+    adCountMap.set(ctx.from.id, next);
+
+    // 超过三次且尚未通知过 → 私聊所有管理员一次
+    if (next > 3 && !notifiedUsers.has(ctx.from.id)) {
+      await notifyAdminsOfSpammer(ctx, next, userId);
+      notifiedUsers.add(ctx.from.id); // 若希望每次都通知，可移除此行与上方判断
+    }
+  }
+
+  // 屏蔽词检查（保持你的原有逻辑）
   if (containsBlockedKeyword(textToCheck)) return;
 
-  // 含链接/@ → 私聊管理员审核
+  // 含链接/@ → 私聊管理员审核（保持你的原有逻辑）
   if (containsLinkOrMention(textToCheck)) {
     try {
       const admins = await bot.api.getChatAdministrators(chatId);
@@ -134,10 +174,10 @@ bot.on("message", async ctx => {
     return;
   }
 
-  // 匿名转发到主群
+  // 匿名转发到主群（保持你的原有逻辑）
   await forwardMessage(ctx, userId);
 
-  // 同步到讨论群（如果是频道转发或讨论群）
+  // 同步到讨论群（如果是频道转发或讨论群）（保持你的原有逻辑）
   if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
     await forwardMessage(ctx, userId, msg.chat.id);
   }
@@ -198,6 +238,9 @@ bot.on("chat_member", async ctx => {
   if (status === "left" || status === "kicked") {
     userMap.delete(userId);
     userHistory.delete(userId);
+    // NEW: 同时清理计数和通知状态，避免数据残留
+    adCountMap.delete(userId);
+    notifiedUsers.delete(userId);
     console.log(`Removed anonymous ID for user ${userId}`);
   }
 });
