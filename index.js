@@ -168,13 +168,17 @@ bot.on("message", async ctx => {
   forwardMessage(ctx, userId, replyTargetId);
 });
 
-// 回调按钮处理
+// 回调按钮处理（仅管理员可操作）
 bot.on("callback_query:data", async ctx => {
+  const userIdClicker = ctx.from.id;
+  const member = await bot.api.getChatMember(chatId, userIdClicker);
+  if (!(member.status === "administrator" || member.status === "creator")) {
+    return ctx.answerCallbackQuery({ text: "Only admins can approve or reject", show_alert: true });
+  }
+
   const data = ctx.callbackQuery.data.split(":");
   const action = data[0];
   const msgId = parseInt(data[1]);
-  const userId = data[2];
-
   const pending = pendingMessages.get(msgId);
   if (!pending) return ctx.answerCallbackQuery({ text: "Message not found or already handled", show_alert: true });
 
