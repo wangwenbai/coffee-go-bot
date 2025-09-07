@@ -67,22 +67,22 @@ function containsLinkOrMention(text) {
 // ---------------------
 // 消息转发函数
 // ---------------------
-async function forwardMessage(ctx, userId, replyTargetId = null) {
+async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】: ${msg.text}` : `【${userId}】`;
 
-    if (msg.photo) sent = await ctx.api.sendPhoto(chatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.video) sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.document) sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.audio) sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.voice) sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.animation) sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.sticker) sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.location) sent = await ctx.api.sendMessage(chatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.poll) sent = await ctx.api.sendPoll(chatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-    else sent = await ctx.api.sendMessage(chatId, caption, { reply_to_message_id: replyTargetId || undefined });
+    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.audio) sent = await ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.voice) sent = await ctx.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.animation) sent = await ctx.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.sticker) sent = await ctx.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.location) sent = await ctx.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.poll) sent = await ctx.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
+    else sent = await ctx.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
@@ -100,26 +100,24 @@ bot.on("message", async ctx => {
 
   const member = await bot.api.getChatMember(chatId, ctx.from.id);
   const isAdmin = member.status === "administrator" || member.status === "creator";
-  const isChannelMsg = !!msg.sender_chat && msg.sender_chat.type === "channel";
-
-  // 管理员消息或频道消息直接显示，不删除
-  if (isAdmin || isChannelMsg) return;
 
   const userId = getUserId(ctx.from.id);
-  const textToCheck = msg.text || msg.caption;
+
+  // 管理员消息不匿名
+  if (isAdmin) return;
+
+  // 删除普通用户消息
+  try { await ctx.deleteMessage(); } catch {}
 
   // 屏蔽词检查
-  if (containsBlockedKeyword(textToCheck)) {
-    try { await ctx.deleteMessage(); } catch {}
-    return;
-  }
+  const textToCheck = msg.text || msg.caption;
+  if (containsBlockedKeyword(textToCheck)) return;
 
   // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
     try {
       const admins = await bot.api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
-
       for (const admin of adminUsers) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
@@ -133,13 +131,16 @@ bot.on("message", async ctx => {
     } catch (err) {
       console.log("Failed to send private review:", err.message);
     }
-    try { await ctx.deleteMessage(); } catch {}
     return;
   }
 
-  // 普通消息 → 匿名转发
-  forwardMessage(ctx, userId);
-  try { await ctx.deleteMessage(); } catch {}
+  // 匿名转发到主群
+  await forwardMessage(ctx, userId);
+
+  // 同步到讨论群（如果是频道转发或讨论群）
+  if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
+    await forwardMessage(ctx, userId, msg.chat.id);
+  }
 });
 
 // ---------------------
@@ -171,7 +172,7 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 编辑所有管理员的通知消息为已处理
+    // 编辑所有管理员通知消息为已处理
     for (const key of pendingKeys) {
       const pending = pendingMessages.get(key);
       try {
@@ -183,7 +184,6 @@ bot.on("callback_query:data", async ctx => {
       }
       pendingMessages.delete(key);
     }
-
   } catch (err) {
     console.log("Error handling callback:", err.message);
   }
