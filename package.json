@@ -1,15 +1,13 @@
 {
   "name": "anonymous-telegram-bot",
   "version": "1.0.0",
-  "description": "An anonymous Telegram bot for group chats, with message forwarding, nick prefix, and private history support.",
   "main": "index.js",
   "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "grammy": "^1.20.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "grammy": "^1.22.4"
   }
 }
