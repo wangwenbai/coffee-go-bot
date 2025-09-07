@@ -12,16 +12,15 @@ const bot = new Bot(process.env.BOT_TOKEN);
 await bot.init();
 
 const chatId = process.env.GROUP_ID;
-const prefix = process.env.NICK_PREFIX || "User-";
+const prefix = process.env.NICK_PREFIX || "User";
 
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-
-// NEW: 恶意广告计数与已通知集合（避免重复通知）
-const adCountMap = new Map();       // telegramId => 广告次数
-const notifiedUsers = new Set();    // telegramId（已触发过通知的用户）
+const usedNicknames = new Set();    // 已分配的匿名码
+const adCountMap = new Map();       // userId => 广告次数
+const notifiedUsers = new Set();    // 已通知过的用户
 
 // ---------------------
 // 屏蔽词逻辑
@@ -43,10 +42,24 @@ fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
 // ---------------------
 // 工具函数
 // ---------------------
-function generateRandomId() { return Math.floor(10000 + Math.random() * 90000); }
+function generateRandomNickname() {
+  let nickname;
+  do {
+    const letters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
+                    String.fromCharCode(65 + Math.floor(Math.random() * 26));
+    const numbers = Math.floor(Math.random() * 10).toString() +
+                    Math.floor(Math.random() * 10).toString();
+    nickname = `${prefix}${letters}${numbers}`;
+  } while (usedNicknames.has(nickname));
+  usedNicknames.add(nickname);
+  return nickname;
+}
 
 function getUserId(userId) {
-  if (!userMap.has(userId)) userMap.set(userId, `${prefix}${generateRandomId()}`);
+  if (!userMap.has(userId)) {
+    const nickname = generateRandomNickname();
+    userMap.set(userId, nickname);
+  }
   return userMap.get(userId);
 }
 
@@ -68,25 +81,25 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
-// NEW: 超过阈值后私聊所有管理员的通知函数
-async function notifyAdminsOfSpammer(ctx, count, anonId) {
+function formatUserIdentity(user) {
+  if (user.username) return `@${user.username}`;
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ");
+  return `${name || "Unknown User"} (no username)`;
+}
+
+async function notifyAdminsOfSpammer(user) {
   try {
     const admins = await bot.api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
-    const username = ctx.from.username ? `@${ctx.from.username}` : "(no username)";
-    const text = [
-      "🚨 Ad-Spam Alert",
-      `User: ${username}`,
-      `Telegram ID: ${ctx.from.id}`,
-      `Anon ID: ${anonId}`,
-      `Detected Ad Attempts: ${count}`,
-      `Action: Please review this member.`
-    ].join("\n");
+    const userIdentity = formatUserIdentity(user);
     for (const admin of adminUsers) {
-      await bot.api.sendMessage(admin.user.id, text);
+      await bot.api.sendMessage(
+        admin.user.id,
+        `🚨 用户 ${userIdentity} 疑似广告，已超过 3 次！`
+      );
     }
   } catch (err) {
-    console.log("Failed to notify admins:", err.message);
+    console.log("Failed to notify admins of spammer:", err.message);
   }
 }
 
@@ -135,26 +148,20 @@ bot.on("message", async ctx => {
   // 删除普通用户消息
   try { await ctx.deleteMessage(); } catch {}
 
-  // NEW: 统计恶意广告（含链接/@ 或 命中屏蔽词）
+  // 屏蔽词检查
   const textToCheck = msg.text || msg.caption;
-  const isAdAttempt = containsLinkOrMention(textToCheck) || containsBlockedKeyword(textToCheck);
-  if (isAdAttempt) {
-    const prev = adCountMap.get(ctx.from.id) || 0;
-    const next = prev + 1;
-    adCountMap.set(ctx.from.id, next);
-
-    // 超过三次且尚未通知过 → 私聊所有管理员一次
-    if (next > 3 && !notifiedUsers.has(ctx.from.id)) {
-      await notifyAdminsOfSpammer(ctx, next, userId);
-      notifiedUsers.add(ctx.from.id); // 若希望每次都通知，可移除此行与上方判断
-    }
-  }
-
-  // 屏蔽词检查（保持你的原有逻辑）
   if (containsBlockedKeyword(textToCheck)) return;
 
-  // 含链接/@ → 私聊管理员审核（保持你的原有逻辑）
+  // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
+    const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
+    adCountMap.set(ctx.from.id, currentCount);
+
+    if (currentCount > 3 && !notifiedUsers.has(ctx.from.id)) {
+      notifiedUsers.add(ctx.from.id);
+      await notifyAdminsOfSpammer(ctx.from);
+    }
+
     try {
       const admins = await bot.api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -174,10 +181,10 @@ bot.on("message", async ctx => {
     return;
   }
 
-  // 匿名转发到主群（保持你的原有逻辑）
+  // 匿名转发到主群
   await forwardMessage(ctx, userId);
 
-  // 同步到讨论群（如果是频道转发或讨论群）（保持你的原有逻辑）
+  // 同步到讨论群（如果是频道转发或讨论群）
   if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
     await forwardMessage(ctx, userId, msg.chat.id);
   }
@@ -236,9 +243,10 @@ bot.on("chat_member", async ctx => {
   const status = ctx.chatMember.new_chat_member.status;
   const userId = ctx.chatMember.new_chat_member.user.id;
   if (status === "left" || status === "kicked") {
+    const nickname = userMap.get(userId);
+    if (nickname) usedNicknames.delete(nickname); // 释放匿名码
     userMap.delete(userId);
     userHistory.delete(userId);
-    // NEW: 同时清理计数和通知状态，避免数据残留
     adCountMap.delete(userId);
     notifiedUsers.delete(userId);
     console.log(`Removed anonymous ID for user ${userId}`);
