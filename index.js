@@ -1,6 +1,7 @@
 import { Bot, webhookCallback } from "grammy";
 import dotenv from "dotenv";
 import express from "express";
+import fs from "fs";
 
 dotenv.config();
 
@@ -13,12 +14,35 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();
 const userHistory = new Map();
 
-// 消息映射：原始消息 ID（用户发的） → 群里机器人消息 ID
+// 消息映射：原始消息 ID → 群里机器人消息 ID
 const messageMap = new Map();
+
+// 屏蔽关键词数组
+let blockedKeywords = [];
+
+// 加载屏蔽词函数
+function loadBlockedKeywords() {
+  try {
+    const data = fs.readFileSync('./blocked.txt', 'utf8');
+    blockedKeywords = data.split(',').map(word => word.trim()).filter(Boolean);
+    console.log(`屏蔽词已加载: ${blockedKeywords.length} 个`);
+  } catch (err) {
+    console.log("加载屏蔽词失败:", err.message);
+  }
+}
+
+// 初始化加载一次
+loadBlockedKeywords();
+
+// 热更新 blocked.txt
+fs.watchFile('./blocked.txt', (curr, prev) => {
+  console.log('blocked.txt 文件发生变化，重新加载...');
+  loadBlockedKeywords();
+});
 
 // 随机生成 5 位数字编号
 function generateRandomId() {
-  return Math.floor(10000 + Math.random() * 90000); // 10000 - 99999
+  return Math.floor(10000 + Math.random() * 90000);
 }
 
 // 获取用户编号（首次分配后绑定）
@@ -36,6 +60,23 @@ function saveUserMessage(userId, msg) {
   userHistory.get(userId).push(msg);
 }
 
+// 判断是否包含屏蔽关键词（大小写不敏感）
+function containsBlockedKeyword(text) {
+  if (!text) return false;
+  const lowerText = text.toLowerCase();
+  return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
+}
+
+// 判断用户是否为群管理员
+async function isAdmin(ctx) {
+  try {
+    const member = await ctx.getChatMember(ctx.from.id);
+    return member.status === "administrator" || member.status === "creator";
+  } catch {
+    return false;
+  }
+}
+
 // 处理所有消息
 bot.on("message", async ctx => {
   const msg = ctx.message;
@@ -47,6 +88,13 @@ bot.on("message", async ctx => {
     await ctx.deleteMessage();
   } catch (err) {
     console.log("删除消息失败:", err.message);
+  }
+
+  // 屏蔽关键词
+  if ((msg.text && containsBlockedKeyword(msg.text))) {
+    console.log(`消息被屏蔽: ${msg.text}`);
+    saveUserMessage(userId, "[屏蔽消息]");
+    return;
   }
 
   // 判断是否是回复消息
@@ -133,7 +181,6 @@ bot.on("message", async ctx => {
       saveUserMessage(userId, "[未知消息类型]");
     }
 
-    // 保存消息映射（关键：用户原始 message_id → 机器人发送的消息 ID）
     if (sent) {
       messageMap.set(msg.message_id, sent.message_id);
     }
@@ -150,11 +197,62 @@ bot.command("history", async ctx => {
   ctx.reply("你的消息历史:\n" + history.join("\n"));
 });
 
-// 监听用户退群，删除编号映射
+// 添加屏蔽词（管理员命令）- 私聊反馈
+bot.command("block", async ctx => {
+  if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以添加屏蔽词。");
+  const args = ctx.message.text.split(" ").slice(1);
+  if (!args.length) return ctx.api.sendMessage(ctx.from.id, "请指定要屏蔽的词。");
+
+  let added = [];
+  for (const word of args) {
+    const cleanWord = word.trim();
+    if (!blockedKeywords.includes(cleanWord)) {
+      blockedKeywords.push(cleanWord);
+      added.push(cleanWord);
+    }
+  }
+
+  if (added.length) {
+    fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
+    await ctx.api.sendMessage(ctx.from.id, `屏蔽词已添加: ${added.join(", ")}`);
+  } else {
+    await ctx.api.sendMessage(ctx.from.id, "这些词已在屏蔽列表中。");
+  }
+});
+
+// 移除屏蔽词（管理员命令）- 私聊反馈
+bot.command("unblock", async ctx => {
+  if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以移除屏蔽词。");
+  const args = ctx.message.text.split(" ").slice(1);
+  if (!args.length) return ctx.api.sendMessage(ctx.from.id, "请指定要移除的词。");
+
+  let removed = [];
+  blockedKeywords = blockedKeywords.filter(word => {
+    if (args.includes(word)) {
+      removed.push(word);
+      return false;
+    }
+    return true;
+  });
+
+  if (removed.length) {
+    fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
+    await ctx.api.sendMessage(ctx.from.id, `屏蔽词已移除: ${removed.join(", ")}`);
+  } else {
+    await ctx.api.sendMessage(ctx.from.id, "这些词不在屏蔽列表中。");
+  }
+});
+
+// 查看当前屏蔽词 - 私聊反馈
+bot.command("blocked", async ctx => {
+  if (!blockedKeywords.length) return ctx.api.sendMessage(ctx.from.id, "当前没有屏蔽词。");
+  await ctx.api.sendMessage(ctx.from.id, `当前屏蔽词: ${blockedKeywords.join(", ")}`);
+});
+
+// 监听用户退群
 bot.on("chat_member", async ctx => {
   const status = ctx.chatMember.new_chat_member.status;
   const userId = ctx.chatMember.new_chat_member.user.id;
-
   if (status === "left" || status === "kicked") {
     userMap.delete(userId);
     userHistory.delete(userId);
