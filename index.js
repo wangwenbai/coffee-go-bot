@@ -197,18 +197,21 @@ bot.command("history", async ctx => {
   ctx.reply("你的消息历史:\n" + history.join("\n"));
 });
 
-// 添加屏蔽词（管理员命令）- 私聊反馈
+// 添加屏蔽词（管理员命令）- 支持英文逗号批量添加 - 私聊反馈
 bot.command("block", async ctx => {
   if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以添加屏蔽词。");
-  const args = ctx.message.text.split(" ").slice(1);
-  if (!args.length) return ctx.api.sendMessage(ctx.from.id, "请指定要屏蔽的词。");
+
+  const text = ctx.message.text.slice(6).trim(); // 去掉 "/block "
+  if (!text) return ctx.api.sendMessage(ctx.from.id, "请指定要屏蔽的词。");
+
+  const words = text.split(",").map(word => word.trim()).filter(Boolean);
+  if (!words.length) return ctx.api.sendMessage(ctx.from.id, "没有有效屏蔽词。");
 
   let added = [];
-  for (const word of args) {
-    const cleanWord = word.trim();
-    if (!blockedKeywords.includes(cleanWord)) {
-      blockedKeywords.push(cleanWord);
-      added.push(cleanWord);
+  for (const word of words) {
+    if (!blockedKeywords.includes(word)) {
+      blockedKeywords.push(word);
+      added.push(word);
     }
   }
 
@@ -220,15 +223,19 @@ bot.command("block", async ctx => {
   }
 });
 
-// 移除屏蔽词（管理员命令）- 私聊反馈
+// 移除屏蔽词（管理员命令）- 支持英文逗号批量删除 - 私聊反馈
 bot.command("unblock", async ctx => {
   if (!(await isAdmin(ctx))) return ctx.api.sendMessage(ctx.from.id, "只有管理员可以移除屏蔽词。");
-  const args = ctx.message.text.split(" ").slice(1);
-  if (!args.length) return ctx.api.sendMessage(ctx.from.id, "请指定要移除的词。");
+
+  const text = ctx.message.text.slice(8).trim(); // 去掉 "/unblock "
+  if (!text) return ctx.api.sendMessage(ctx.from.id, "请指定要移除的词。");
+
+  const words = text.split(",").map(word => word.trim()).filter(Boolean);
+  if (!words.length) return ctx.api.sendMessage(ctx.from.id, "没有有效屏蔽词。");
 
   let removed = [];
   blockedKeywords = blockedKeywords.filter(word => {
-    if (args.includes(word)) {
+    if (words.includes(word)) {
       removed.push(word);
       return false;
     }
