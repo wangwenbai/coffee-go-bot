@@ -17,7 +17,7 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId }
+const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 
 // ---------------------
 // 屏蔽词逻辑
@@ -119,7 +119,7 @@ bot.on("message", async ctx => {
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${msg.text || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
-        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id });
+        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
       }
     } catch (err) {
       console.log("Failed to send private review:", err.message);
@@ -162,14 +162,12 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 🔹 编辑所有管理员的通知消息
+    // 🔹 编辑所有管理员的通知消息为已处理
     for (const key of pendingKeys) {
       const pending = pendingMessages.get(key);
       try {
-        await ctx.api.editMessageText(pending.ctx.from.id, pending.notifMsgId,
-          `✅ Message processed`, {
-            reply_markup: new InlineKeyboard().text("✅ Processed", "processed")
-          }
+        await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+          { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
         );
       } catch (err) {
         console.log("Failed to edit notification message:", err.message);
