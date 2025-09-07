@@ -20,7 +20,6 @@ const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 const usedNicknames = new Set();    // 已分配的匿名码
 const adCountMap = new Map();       // userId => 广告次数
-const blockedCountMap = new Map();  // userId => 屏蔽词违规次数
 const notifiedUsers = new Set();    // 已通知过的用户
 
 // ---------------------
@@ -75,12 +74,6 @@ function containsBlockedKeyword(text) {
   return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
 }
 
-function getBlockedWordsInText(text) {
-  if (!text) return [];
-  const lowerText = text.toLowerCase();
-  return blockedKeywords.filter(word => lowerText.includes(word.toLowerCase()));
-}
-
 function containsLinkOrMention(text) {
   if (!text) return false;
   const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/i;
@@ -94,7 +87,7 @@ function formatUserIdentity(user) {
   return `${name || "Unknown User"} (no username)`;
 }
 
-async function notifyAdminsOfViolation(user, violationContents, violationType) {
+async function notifyAdminsOfSpammer(user) {
   try {
     const admins = await bot.api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -102,11 +95,11 @@ async function notifyAdminsOfViolation(user, violationContents, violationType) {
     for (const admin of adminUsers) {
       await bot.api.sendMessage(
         admin.user.id,
-        `🚨 用户 ${userIdentity} 触发违规 (${violationType}) 已超过 3 次！\n触发内容：${violationContents.join(", ")}`
+        `🚨 用户 ${userIdentity} 疑似广告，已超过 3 次！`
       );
     }
   } catch (err) {
-    console.log("Failed to notify admins of violation:", err.message);
+    console.log("Failed to notify admins of spammer:", err.message);
   }
 }
 
@@ -155,29 +148,18 @@ bot.on("message", async ctx => {
   // 删除普通用户消息
   try { await ctx.deleteMessage(); } catch {}
 
-  const textToCheck = msg.text || msg.caption;
-
   // 屏蔽词检查
-  const matchedBlockedWords = getBlockedWordsInText(textToCheck);
-  if (matchedBlockedWords.length > 0) {
-    const count = (blockedCountMap.get(ctx.from.id) || 0) + 1;
-    blockedCountMap.set(ctx.from.id, count);
+  const textToCheck = msg.text || msg.caption;
+  if (containsBlockedKeyword(textToCheck)) return;
 
-    if (count > 3 && !notifiedUsers.has(ctx.from.id)) {
-      notifiedUsers.add(ctx.from.id);
-      await notifyAdminsOfViolation(ctx.from, matchedBlockedWords, "blocked words");
-    }
-    return; // 触发屏蔽词直接不转发
-  }
-
-  // 广告逻辑
+  // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
     const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
     adCountMap.set(ctx.from.id, currentCount);
 
     if (currentCount > 3 && !notifiedUsers.has(ctx.from.id)) {
       notifiedUsers.add(ctx.from.id);
-      await notifyAdminsOfViolation(ctx.from, [textToCheck], "link/mention");
+      await notifyAdminsOfSpammer(ctx.from);
     }
 
     try {
@@ -201,4 +183,96 @@ bot.on("message", async ctx => {
 
   // 匿名转发到主群
   await forwardMessage(ctx, userId);
+
+  // 同步到讨论群（如果是频道转发或讨论群）
+  if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
+    await forwardMessage(ctx, userId, msg.chat.id);
+  }
+});
+
+// ---------------------
+// 回调查询（审核按钮）
+// ---------------------
+bot.on("callback_query:data", async ctx => {
+  const userIdClicker = ctx.from.id;
+  const member = await bot.api.getChatMember(chatId, userIdClicker);
+  if (!(member.status === "administrator" || member.status === "creator")) {
+    return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
+  }
+
+  const data = ctx.callbackQuery.data.split(":");
+  const action = data[0];
+  const origMsgId = parseInt(data[1]);
+  const origUserId = parseInt(data[2]);
+
+  const pendingKeys = Array.from(pendingMessages.keys()).filter(key => key.startsWith(`${origMsgId}:`));
+
+  if (pendingKeys.length === 0) {
+    return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
+  }
+
+  try {
+    if (action === "approve") {
+      await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
+      await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
+    } else if (action === "reject") {
+      await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
+    }
+
+    // 编辑所有管理员通知消息为已处理
+    for (const key of pendingKeys) {
+      const pending = pendingMessages.get(key);
+      try {
+        await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+          { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
+        );
+      } catch (err) {
+        console.log("Failed to edit notification message:", err.message);
+      }
+      pendingMessages.delete(key);
+    }
+  } catch (err) {
+    console.log("Error handling callback:", err.message);
+  }
+});
+
+// ---------------------
+// 用户退群清理
+// ---------------------
+bot.on("chat_member", async ctx => {
+  const status = ctx.chatMember.new_chat_member.status;
+  const userId = ctx.chatMember.new_chat_member.user.id;
+  if (status === "left" || status === "kicked") {
+    const nickname = userMap.get(userId);
+    if (nickname) usedNicknames.delete(nickname); // 释放匿名码
+    userMap.delete(userId);
+    userHistory.delete(userId);
+    adCountMap.delete(userId);
+    notifiedUsers.delete(userId);
+    console.log(`Removed anonymous ID for user ${userId}`);
+  }
+});
+
+// ---------------------
+// Express Webhook (Render)
+// ---------------------
+const app = express();
+const port = process.env.PORT || 3000;
+const webhookPath = `/bot${process.env.BOT_TOKEN}`;
+
+app.use(express.json());
+app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
+app.get("/", (req, res) => res.send("Bot running"));
+
+app.listen(port, async () => {
+  console.log(`Listening on port ${port}`);
+  if (!process.env.RENDER_EXTERNAL_URL) return;
+  const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}${webhookPath}`;
+  try {
+    await bot.api.deleteWebhook({ drop_pending_updates: true });
+    await bot.api.setWebhook(webhookUrl);
+    console.log(`Webhook set to ${webhookUrl}`);
+  } catch (err) {
+    console.log("Webhook setup failed:", err.message);
+  }
 });
