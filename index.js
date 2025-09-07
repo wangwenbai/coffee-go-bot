@@ -1,6 +1,7 @@
 import { Bot, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import fs from "fs";
+import express from "express";
 
 dotenv.config();
 
@@ -52,7 +53,6 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
-// Forward message anonymously to group
 async function forwardMessage(ctx, userId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
@@ -81,7 +81,6 @@ bot.on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
-  // Get anonymous ID
   const userId = getUserId(ctx.from.id);
 
   // Delete original message
@@ -102,7 +101,7 @@ bot.on("message", async ctx => {
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
 
         await bot.api.sendMessage(admin.user.id,
-          `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent hidden for privacy.\nApprove to forward or reject.`,
+          `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${msg.text || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
       }
@@ -156,7 +155,6 @@ bot.on("chat_member", async ctx => {
 });
 
 // Start bot with webhook (Render)
-import express from "express";
 const app = express();
 const port = process.env.PORT || 3000;
 const webhookPath = `/bot${process.env.BOT_TOKEN}`;
