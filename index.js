@@ -1,4 +1,4 @@
-import { Bot, webhookCallback } from "grammy";
+import { Bot, webhookCallback, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import express from "express";
 import fs from "fs";
@@ -13,6 +13,9 @@ const prefix = process.env.NICK_PREFIX || "User-";
 const userMap = new Map();
 const userHistory = new Map();
 const messageMap = new Map();
+
+// 待管理员审核消息
+const pendingMessages = new Map();
 
 // 屏蔽关键词
 let blockedKeywords = [];
@@ -77,6 +80,50 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
+// 转发消息函数
+async function forwardMessage(ctx, userId, replyTargetId = null) {
+  const msg = ctx.message;
+  let sent;
+  if (msg.text) {
+    sent = await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, msg.text);
+  } else if (msg.photo) {
+    const photo = msg.photo[msg.photo.length - 1].file_id;
+    sent = await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[照片]");
+  } else if (msg.sticker) {
+    sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[贴纸]");
+  } else if (msg.video) {
+    sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[视频]");
+  } else if (msg.document) {
+    sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[文件]");
+  } else if (msg.audio) {
+    sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[音频]");
+  } else if (msg.voice) {
+    sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[语音]");
+  } else if (msg.animation) {
+    sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[动画]");
+  } else if (msg.location) {
+    sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[位置]");
+  } else if (msg.poll) {
+    const poll = msg.poll;
+    sent = await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), { type: poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[投票]");
+  } else {
+    sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`, { reply_to_message_id: replyTargetId || undefined });
+    saveUserMessage(userId, "[未知消息类型]");
+  }
+
+  if (sent) messageMap.set(msg.message_id, sent.message_id);
+}
+
 // 群消息处理
 bot.on("message", async ctx => {
   const msg = ctx.message;
@@ -86,75 +133,54 @@ bot.on("message", async ctx => {
   if (await isAdminMessage(ctx.from.id)) return;
 
   const userId = getUserId(ctx.from.id);
-  try { await ctx.deleteMessage(); } catch {}
-
-  if ((msg.text && containsBlockedKeyword(msg.text))) {
-    saveUserMessage(userId, "[屏蔽消息]");
-    return;
-  }
-
-  // 检测链接或 @ 用户，私聊管理员
-  if (msg.text && containsLinkOrMention(msg.text)) {
-    try {
-      const admins = await bot.api.getChatAdministrators(chatId);
-      for (const admin of admins) {
-        if (!admin.user.is_bot) {
-          bot.api.sendMessage(admin.user.id, `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户：\n${msg.text}`);
-        }
-      }
-    } catch (err) {
-      console.log("发送私聊给管理员失败:", err.message);
-    }
-  }
-
   let replyTargetId = null;
   if (msg.reply_to_message) {
     const repliedMsgId = msg.reply_to_message.message_id;
     replyTargetId = messageMap.get(repliedMsgId) || null;
   }
 
-  try {
-    let sent;
-    if (msg.text) {
-      sent = await ctx.api.sendMessage(chatId, `【${userId}】: ${msg.text}`, { reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, msg.text);
-    } else if (msg.photo) {
-      const photo = msg.photo[msg.photo.length - 1].file_id;
-      sent = await ctx.api.sendPhoto(chatId, photo, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[照片]");
-    } else if (msg.sticker) {
-      sent = await ctx.api.sendSticker(chatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[贴纸]");
-    } else if (msg.video) {
-      sent = await ctx.api.sendVideo(chatId, msg.video.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[视频]");
-    } else if (msg.document) {
-      sent = await ctx.api.sendDocument(chatId, msg.document.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[文件]");
-    } else if (msg.audio) {
-      sent = await ctx.api.sendAudio(chatId, msg.audio.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[音频]");
-    } else if (msg.voice) {
-      sent = await ctx.api.sendVoice(chatId, msg.voice.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[语音]");
-    } else if (msg.animation) {
-      sent = await ctx.api.sendAnimation(chatId, msg.animation.file_id, { caption: `【${userId}】`, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[动画]");
-    } else if (msg.location) {
-      sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了位置: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[位置]");
-    } else if (msg.poll) {
-      const poll = msg.poll;
-      sent = await ctx.api.sendPoll(chatId, poll.question, poll.options.map(o => o.text), { type: poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[投票]");
-    } else {
-      sent = await ctx.api.sendMessage(chatId, `【${userId}】发送了未支持的消息类型`, { reply_to_message_id: replyTargetId || undefined });
-      saveUserMessage(userId, "[未知消息类型]");
-    }
+  try { await ctx.deleteMessage(); } catch {}
 
-    if (sent) messageMap.set(msg.message_id, sent.message_id);
-  } catch (err) {
-    console.log("转发消息失败:", err.message);
+  if (msg.text && containsBlockedKeyword(msg.text)) {
+    saveUserMessage(userId, "[屏蔽消息]");
+    return;
+  }
+
+  // 链接/@ 用户消息 → 待管理员审核
+  if (msg.text && containsLinkOrMention(msg.text)) {
+    const admins = await bot.api.getChatAdministrators(chatId);
+    for (const admin of admins) {
+      if (!admin.user.is_bot) {
+        const keyboard = new InlineKeyboard()
+          .text("✅ 同意", `approve:${msg.message_id}:${ctx.from.id}`)
+          .text("❌ 拒绝", `reject:${msg.message_id}:${ctx.from.id}`);
+        await bot.api.sendMessage(admin.user.id,
+          `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户，请审核：\n${msg.text}`,
+          { reply_markup: keyboard }
+        );
+      }
+    }
+    pendingMessages.set(msg.message_id, { ctx, userId, replyTargetId });
+    return; // 审核前不转发
+  }
+
+  // 普通消息直接匿名转发
+  forwardMessage(ctx, userId, replyTargetId);
+});
+
+// 回调按钮处理
+bot.on("callback_query:data", async ctx => {
+  const [action, msgId, userId] = ctx.callbackQuery.data.split(":");
+  const pending = pendingMessages.get(Number(msgId));
+  if (!pending) return ctx.answerCallbackQuery({ text: "消息不存在或已处理" });
+
+  if (action === "approve") {
+    await forwardMessage(pending.ctx, pending.userId, pending.replyTargetId);
+    pendingMessages.delete(Number(msgId));
+    await ctx.answerCallbackQuery({ text: "已同意转发" });
+  } else if (action === "reject") {
+    pendingMessages.delete(Number(msgId));
+    await ctx.answerCallbackQuery({ text: "已拒绝转发" });
   }
 });
 
