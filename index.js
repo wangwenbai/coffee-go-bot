@@ -30,11 +30,7 @@ function loadBlockedKeywords() {
     console.log("加载屏蔽词失败:", err.message);
   }
 }
-
-// 初始加载
 loadBlockedKeywords();
-
-// 热更新 blocked.txt
 fs.watchFile('./blocked.txt', () => {
   console.log('blocked.txt 文件变化，重新加载...');
   loadBlockedKeywords();
@@ -44,8 +40,6 @@ fs.watchFile('./blocked.txt', () => {
 function generateRandomId() {
   return Math.floor(10000 + Math.random() * 90000);
 }
-
-// 获取用户编号
 function getUserId(userId) {
   if (!userMap.has(userId)) {
     const randomId = generateRandomId();
@@ -72,22 +66,19 @@ async function isAdminInGroup(userId) {
   try {
     const member = await bot.api.getChatMember(chatId, userId);
     return member.status === "administrator" || member.status === "creator";
-  } catch {
+  } catch (err) {
+    console.log("检查管理员失败:", err.message);
     return false;
   }
 }
 
-// 处理群消息
+// 群消息处理
 bot.on("message", async ctx => {
   const msg = ctx.message;
-
-  if (ctx.chat.type === "private") return; // 私聊消息跳过
-
-  if (ctx.from.is_bot) return; // 机器人消息不处理
+  if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
   const userId = getUserId(ctx.from.id);
-
-  try { await ctx.deleteMessage(); } catch (err) { console.log("删除消息失败:", err.message); }
+  try { await ctx.deleteMessage(); } catch {}
 
   if ((msg.text && containsBlockedKeyword(msg.text))) {
     saveUserMessage(userId, "[屏蔽消息]");
@@ -162,11 +153,13 @@ bot.command("history", async ctx => {
 
 // 私聊添加屏蔽词
 bot.command("block", async ctx => {
-  if (ctx.chat.type !== "private") return; 
+  if (ctx.chat.type !== "private") return;
   if (!(await isAdminInGroup(ctx.from.id))) return ctx.reply("只有群管理员可以添加屏蔽词。");
 
-  const text = ctx.message.text.slice(6).trim();
-  if (!text) return ctx.reply("请指定要屏蔽的词。");
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) return ctx.reply("请在命令后指定要屏蔽的词，例如: /block spam,scam,freegift");
+  const text = parts.slice(1).join(" ").trim();
+
   const words = text.split(",").map(w => w.trim()).filter(Boolean);
   if (!words.length) return ctx.reply("没有有效屏蔽词。");
 
@@ -178,10 +171,15 @@ bot.command("block", async ctx => {
     }
   }
 
-  if (added.length) {
-    fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-    ctx.reply(`屏蔽词已添加: ${added.join(", ")}`);
-  } else ctx.reply("这些词已在屏蔽列表中。");
+  try {
+    if (added.length) {
+      fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
+      ctx.reply(`屏蔽词已添加: ${added.join(", ")}`);
+    } else ctx.reply("这些词已在屏蔽列表中。");
+  } catch (err) {
+    console.log("写入屏蔽词文件失败:", err.message);
+    ctx.reply("添加失败，请稍后重试。");
+  }
 });
 
 // 私聊移除屏蔽词
@@ -189,8 +187,10 @@ bot.command("unblock", async ctx => {
   if (ctx.chat.type !== "private") return;
   if (!(await isAdminInGroup(ctx.from.id))) return ctx.reply("只有群管理员可以移除屏蔽词。");
 
-  const text = ctx.message.text.slice(8).trim();
-  if (!text) return ctx.reply("请指定要移除的词。");
+  const parts = ctx.message.text.split(" ");
+  if (parts.length < 2) return ctx.reply("请在命令后指定要移除的词，例如: /unblock spam,scam");
+  const text = parts.slice(1).join(" ").trim();
+
   const words = text.split(",").map(w => w.trim()).filter(Boolean);
   if (!words.length) return ctx.reply("没有有效屏蔽词。");
 
@@ -200,10 +200,15 @@ bot.command("unblock", async ctx => {
     return true;
   });
 
-  if (removed.length) {
-    fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
-    ctx.reply(`屏蔽词已移除: ${removed.join(", ")}`);
-  } else ctx.reply("这些词不在屏蔽列表中。");
+  try {
+    if (removed.length) {
+      fs.writeFileSync('./blocked.txt', blockedKeywords.join(","), "utf8");
+      ctx.reply(`屏蔽词已移除: ${removed.join(", ")}`);
+    } else ctx.reply("这些词不在屏蔽列表中。");
+  } catch (err) {
+    console.log("写入屏蔽词文件失败:", err.message);
+    ctx.reply("移除失败，请稍后重试。");
+  }
 });
 
 // 私聊查看屏蔽词
@@ -224,7 +229,7 @@ bot.on("chat_member", async ctx => {
   }
 });
 
-// Express 绑定端口
+// Express 绑定端口和 Webhook
 const app = express();
 const port = process.env.PORT || 3000;
 const webhookPath = `/bot${process.env.BOT_TOKEN}`;
@@ -232,9 +237,9 @@ app.use(express.json());
 app.post(webhookPath, webhookCallback(bot, "express"));
 app.get("/", (req, res) => res.send("Bot is running"));
 
-// 启动
 app.listen(port, async () => {
   console.log(`Server listening on port ${port}`);
+  if (!process.env.RENDER_EXTERNAL_URL) return;
   const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}${webhookPath}`;
   try {
     await bot.api.deleteWebhook({ drop_pending_updates: true });
