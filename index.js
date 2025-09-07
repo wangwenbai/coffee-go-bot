@@ -21,6 +21,7 @@ function generateRandomId() {
   return Math.floor(10000 + Math.random() * 90000); // 10000 - 99999
 }
 
+// 获取用户编号（首次分配后绑定）
 function getUserId(userId) {
   if (!userMap.has(userId)) {
     const randomId = generateRandomId();
@@ -29,12 +30,13 @@ function getUserId(userId) {
   return userMap.get(userId);
 }
 
+// 保存用户历史消息
 function saveUserMessage(userId, msg) {
   if (!userHistory.has(userId)) userHistory.set(userId, []);
   userHistory.get(userId).push(msg);
 }
 
-// 处理消息
+// 处理所有消息
 bot.on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.from.is_bot) return;
