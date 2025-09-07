@@ -69,6 +69,14 @@ async function isAdminMessage(userId) {
   }
 }
 
+// 检测是否包含链接或 @ 用户
+function containsLinkOrMention(text) {
+  if (!text) return false;
+  const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/i;
+  const mentionRegex = /@[a-zA-Z0-9_]+/;
+  return urlRegex.test(text) || mentionRegex.test(text);
+}
+
 // 群消息处理
 bot.on("message", async ctx => {
   const msg = ctx.message;
@@ -83,6 +91,20 @@ bot.on("message", async ctx => {
   if ((msg.text && containsBlockedKeyword(msg.text))) {
     saveUserMessage(userId, "[屏蔽消息]");
     return;
+  }
+
+  // 检测链接或 @ 用户，私聊管理员
+  if (msg.text && containsLinkOrMention(msg.text)) {
+    try {
+      const admins = await bot.api.getChatAdministrators(chatId);
+      for (const admin of admins) {
+        if (!admin.user.is_bot) {
+          bot.api.sendMessage(admin.user.id, `用户 ${ctx.from.first_name} (${userId}) 发送了链接或 @ 用户：\n${msg.text}`);
+        }
+      }
+    } catch (err) {
+      console.log("发送私聊给管理员失败:", err.message);
+    }
   }
 
   let replyTargetId = null;
