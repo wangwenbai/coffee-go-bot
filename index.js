@@ -1,194 +1,208 @@
 import express from "express";
 import fs from "fs";
 import { Bot, InlineKeyboard } from "grammy";
-import path from "path";
 
+// 读取环境变量
 const TOKEN = process.env.BOT_TOKEN;
-const GROUP_ID = process.env.GROUP_ID;
-const ADMIN_IDS = (process.env.ADMIN_IDS || "").split(",").map((id) => id.trim());
+const GROUP_ID = process.env.GROUP_ID; // 目标群 ID
+const PUBLIC_URL = process.env.PUBLIC_URL; // 你在 Render 配置的公网 URL
+
+if (!TOKEN || !GROUP_ID || !PUBLIC_URL) {
+  console.error("❌ Missing BOT_TOKEN, GROUP_ID or PUBLIC_URL in environment variables!");
+  process.exit(1);
+}
 
 const bot = new Bot(TOKEN);
+const app = express();
 
-// 保存用户编号映射
-const userMap = new Map();
-
-// 屏蔽词文件
-const BLOCKED_FILE = path.resolve("blocked.txt");
+// ========= 屏蔽词 =========
 let blockedWords = [];
-
-// 加载屏蔽词
 function loadBlockedWords() {
-  if (fs.existsSync(BLOCKED_FILE)) {
-    const text = fs.readFileSync(BLOCKED_FILE, "utf8");
-    blockedWords = text
-      .split(",")
-      .map((w) => w.trim().toLowerCase())
-      .filter(Boolean);
-    console.log("Blocked keywords loaded:", blockedWords.length);
+  try {
+    const data = fs.readFileSync("blocked.txt", "utf8");
+    blockedWords = data.split(",").map(w => w.trim().toLowerCase()).filter(Boolean);
+    console.log(`Blocked keywords loaded: ${blockedWords.length}`);
+  } catch (err) {
+    console.error("Failed to load blocked.txt:", err.message);
+    blockedWords = [];
   }
 }
 loadBlockedWords();
 
-// 热更新屏蔽词
-fs.watchFile(BLOCKED_FILE, () => {
-  console.log("blocked.txt updated, reloading...");
-  loadBlockedWords();
-});
+// ========= 审核存储 =========
+const pendingReviews = new Map(); // key: reviewId
 
-// 生成随机 5 位数编号
-function getAnonId(userId) {
-  if (!userMap.has(userId)) {
-    const randomId = Math.floor(10000 + Math.random() * 90000);
-    userMap.set(userId, `User ${randomId}`);
+// ========= 获取管理员 =========
+async function getAdmins() {
+  try {
+    const admins = await bot.api.getChatAdministrators(GROUP_ID);
+    return admins.map(a => a.user);
+  } catch (err) {
+    console.error("Failed to fetch admins:", err.message);
+    return [];
   }
-  return userMap.get(userId);
 }
 
-// 屏蔽词检测
+// ========= 检查屏蔽词 =========
 function containsBlockedWord(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
-  return blockedWords.some((w) => lower.includes(w));
+  return blockedWords.some(word => lower.includes(word));
 }
 
-// 链接/@检测
-function containsLinkOrMention(text) {
-  if (!text) return false;
-  return /(https?:\/\/|www\.)/.test(text) || /@[\w_]+/.test(text);
+// ========= 审核逻辑 =========
+async function sendToAdminsForReview(originalMsg) {
+  const admins = await getAdmins();
+  if (!admins.length) return;
+
+  const reviewId = Date.now().toString();
+  pendingReviews.set(reviewId, {
+    originalMsg,
+    handled: false,
+  });
+
+  for (const admin of admins) {
+    try {
+      const kb = new InlineKeyboard()
+        .text("✅ Approve", `approve:${reviewId}`)
+        .text("❌ Reject", `reject:${reviewId}`);
+
+      await bot.api.sendMessage(admin.id, `Review needed:\n\n${originalMsg.text || "[Media message]"}`, {
+        reply_markup: kb,
+      });
+    } catch (err) {
+      console.error(`Failed to send private review to ${admin.id}:`, err.message);
+    }
+  }
 }
 
-// 消息处理
+// ========= 处理消息 =========
 bot.on("message", async (ctx) => {
   const msg = ctx.message;
 
-  // 1. 跳过频道推送消息（保留评论按钮）
-  if (msg.is_automatic_forward) {
-    return;
-  }
-
-  // 2. 管理员消息 -> 不删除、不匿名
-  const member = await ctx.getChatMember(ctx.from.id);
-  if (["creator", "administrator"].includes(member.status)) {
-    return;
-  }
-
-  // 3. 普通用户消息
-  const text = msg.text || msg.caption || "";
-
-  // 屏蔽词
-  if (containsBlockedWord(text)) {
-    try {
-      await ctx.deleteMessage();
-    } catch {}
-    return;
-  }
-
-  // 链接/@ 审核
-  if (containsLinkOrMention(text)) {
-    try {
-      await ctx.deleteMessage();
-    } catch {}
-    const anonId = getAnonId(ctx.from.id);
-
-    for (const adminId of ADMIN_IDS) {
-      try {
-        const keyboard = new InlineKeyboard()
-          .text("✅ Approve", `approve:${ctx.chat.id}:${ctx.from.id}:${msg.message_id}`)
-          .text("❌ Reject", `reject:${ctx.chat.id}:${ctx.from.id}:${msg.message_id}`);
-
-        await bot.api.sendMessage(
-          adminId,
-          `Message from ${anonId} requires review:\n\n${text}`,
-          { reply_markup: keyboard }
-        );
-      } catch (err) {
-        console.error("Notify admin failed", err.message);
-      }
+  // 管理员消息：直接转发，不屏蔽
+  try {
+    const member = await ctx.api.getChatMember(GROUP_ID, msg.from.id);
+    if (member.status === "administrator" || member.status === "creator") {
+      return; // 管理员消息放行
     }
+  } catch (err) {
+    console.error("Check admin failed:", err.message);
+  }
+
+  // 检查屏蔽词
+  const textContent = msg.text || msg.caption || "";
+  if (containsBlockedWord(textContent)) {
+    try {
+      await ctx.deleteMessage();
+    } catch {}
     return;
   }
 
-  // 匿名转发普通消息
+  // 检查链接或 @username
+  const entities = msg.entities || msg.caption_entities || [];
+  const hasLink = entities.some(e =>
+    e.type === "url" ||
+    e.type === "text_link" ||
+    (e.type === "mention")
+  );
+
+  if (hasLink) {
+    try {
+      await ctx.deleteMessage();
+    } catch {}
+    await sendToAdminsForReview(msg);
+    return;
+  }
+
+  // 其他普通消息：匿名转发
   try {
     await ctx.deleteMessage();
-  } catch {}
-  const anonId = getAnonId(ctx.from.id);
-
-  if (msg.photo) {
-    await bot.api.sendPhoto(GROUP_ID, msg.photo.at(-1).file_id, {
-      caption: `${anonId}: ${msg.caption || ""}`,
-    });
-  } else if (msg.video) {
-    await bot.api.sendVideo(GROUP_ID, msg.video.file_id, {
-      caption: `${anonId}: ${msg.caption || ""}`,
-    });
-  } else if (msg.document) {
-    await bot.api.sendDocument(GROUP_ID, msg.document.file_id, {
-      caption: `${anonId}: ${msg.caption || ""}`,
-    });
-  } else if (msg.sticker) {
-    await bot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
-  } else if (msg.voice) {
-    await bot.api.sendVoice(GROUP_ID, msg.voice.file_id, {
-      caption: `${anonId}`,
-    });
-  } else if (msg.audio) {
-    await bot.api.sendAudio(GROUP_ID, msg.audio.file_id, {
-      caption: `${anonId}: ${msg.caption || ""}`,
-    });
-  } else if (msg.video_note) {
-    await bot.api.sendVideoNote(GROUP_ID, msg.video_note.file_id);
-  } else if (msg.location) {
-    await bot.api.sendLocation(GROUP_ID, msg.location.latitude, msg.location.longitude);
-  } else if (msg.poll) {
-    await bot.api.sendPoll(GROUP_ID, msg.poll.question, msg.poll.options.map((o) => o.text));
-  } else {
-    await bot.api.sendMessage(GROUP_ID, `${anonId}: ${text}`);
+    if (msg.text) {
+      await bot.api.sendMessage(GROUP_ID, msg.text);
+    } else if (msg.photo) {
+      await bot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
+        caption: msg.caption || undefined,
+      });
+    } else if (msg.video) {
+      await bot.api.sendVideo(GROUP_ID, msg.video.file_id, {
+        caption: msg.caption || undefined,
+      });
+    }
+  } catch (err) {
+    console.error("Forward failed:", err.message);
   }
 });
 
-// 管理员审核按钮
+// ========= 审核回调 =========
 bot.on("callback_query:data", async (ctx) => {
-  const [action, chatId, userId] = ctx.callbackQuery.data.split(":");
-  const fromId = String(ctx.from.id);
+  const [action, reviewId] = ctx.callbackQuery.data.split(":");
+  const review = pendingReviews.get(reviewId);
 
-  if (!ADMIN_IDS.includes(fromId)) {
-    return ctx.answerCallbackQuery({ text: "Only admins can act.", show_alert: true });
+  if (!review || review.handled) {
+    return ctx.answerCallbackQuery({ text: "Already handled", show_alert: false });
   }
 
-  const anonId = getAnonId(userId);
-  const originalText = ctx.callbackQuery.message.text.split("\n\n")[1] || "";
+  // 确认操作者是否管理员
+  try {
+    const member = await ctx.api.getChatMember(GROUP_ID, ctx.from.id);
+    if (member.status !== "administrator" && member.status !== "creator") {
+      return ctx.answerCallbackQuery({ text: "Not authorized", show_alert: true });
+    }
+  } catch {
+    return ctx.answerCallbackQuery({ text: "Check failed", show_alert: true });
+  }
+
+  review.handled = true;
 
   if (action === "approve") {
-    await bot.api.sendMessage(chatId, `${anonId}: ${originalText}`);
-    await ctx.editMessageText(`✅ Processed: ${originalText}`, {
-      reply_markup: new InlineKeyboard().text("Processed"),
-    });
-  } else if (action === "reject") {
-    await ctx.editMessageText(`❌ Rejected`, {
-      reply_markup: new InlineKeyboard().text("Processed"),
-    });
+    const msg = review.originalMsg;
+    try {
+      if (msg.text) {
+        await bot.api.sendMessage(GROUP_ID, msg.text);
+      } else if (msg.photo) {
+        await bot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
+          caption: msg.caption || undefined,
+        });
+      } else if (msg.video) {
+        await bot.api.sendVideo(GROUP_ID, msg.video.file_id, {
+          caption: msg.caption || undefined,
+        });
+      }
+    } catch (err) {
+      console.error("Send approved failed:", err.message);
+    }
   }
 
-  await ctx.answerCallbackQuery({ text: "Done" });
+  // 编辑所有管理员的按钮为 "Processed"
+  const admins = await getAdmins();
+  for (const admin of admins) {
+    try {
+      await ctx.api.editMessageReplyMarkup(admin.id, ctx.callbackQuery.message.message_id, {
+        reply_markup: new InlineKeyboard().text("✔ Processed", "noop"),
+      });
+    } catch (err) {
+      console.error("Failed to update admin msg:", err.message);
+    }
+  }
+
+  await ctx.answerCallbackQuery({ text: "Processed" });
 });
 
-// Express + Webhook
-const app = express();
+// ========= Webhook =========
 app.use(express.json());
-
 app.post(`/bot${TOKEN}`, (req, res) => {
-  bot.handleUpdate(req.body, res).catch((err) => console.error(err));
+  bot.handleUpdate(req.body);
+  res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`Listening on port ${PORT}`);
   try {
-    await bot.api.deleteWebhook();
-    await bot.api.setWebhook(`https://${process.env.RENDER_EXTERNAL_URL}/bot${TOKEN}`);
-    console.log("Webhook set");
+    await bot.api.setWebhook(`${PUBLIC_URL}/bot${TOKEN}`);
+    console.log("Webhook set to", `${PUBLIC_URL}/bot${TOKEN}`);
   } catch (err) {
-    console.error("Failed to set webhook", err.message);
+    console.error("Failed to set webhook:", err.message);
   }
 });
