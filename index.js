@@ -8,29 +8,26 @@ dotenv.config();
 // ---------------------
 // 环境变量
 // ---------------------
-const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean); // 多机器人
+const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean);
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
-const MAX_HISTORY = parseInt(process.env.MAX_HISTORY) || 50;           // 每个用户历史消息最大条数
-const MAX_FORWARDED = parseInt(process.env.MAX_FORWARDED) || 1000;    // 去重队列最大长度
+const MAX_HISTORY = parseInt(process.env.MAX_HISTORY) || 50;
+const MAX_FORWARDED = parseInt(process.env.MAX_FORWARDED) || 1000;
 
 // ---------------------
 // 全局存储
 // ---------------------
-const userMap = new Map();          // telegramId => 匿名编号
-const userHistory = new Map();      // 匿名编号 => 历史消息
-const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-const usedNicknames = new Set();    
-const adCountMap = new Map();       
-const notifiedUsers = new Set();    
+const userMap = new Map();         
+const userHistory = new Map();     
+const messageMap = new Map();      
+const pendingMessages = new Map(); 
+const usedNicknames = new Set();   
+const adCountMap = new Map();      
+const notifiedUsers = new Set();   
 
-// ---------------------
 // 去重队列
-// ---------------------
 const forwardedMessages = new Set();
 const forwardedQueue = [];
-
 function markMessageForwarded(msgId) {
   if (!forwardedMessages.has(msgId)) {
     forwardedMessages.add(msgId);
@@ -43,21 +40,17 @@ function markMessageForwarded(msgId) {
 }
 
 // ---------------------
-// 屏蔽词逻辑（优化为单个正则）
+// 屏蔽词逻辑
 // ---------------------
 let blockedKeywords = [];
 let blockedRegex = null;
-
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
     blockedKeywords = data.split('\n').map(w => w.trim()).filter(Boolean);
-    if (blockedKeywords.length > 0) {
-      const pattern = blockedKeywords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-      blockedRegex = new RegExp(pattern, 'i');
-    } else {
-      blockedRegex = null;
-    }
+    blockedRegex = blockedKeywords.length > 0
+      ? new RegExp(blockedKeywords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|'), 'i')
+      : null;
     console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
     console.log("Failed to load blocked keywords:", err.message);
@@ -96,7 +89,7 @@ function saveUserMessage(userId, msg) {
   if (!userHistory.has(userId)) userHistory.set(userId, []);
   const history = userHistory.get(userId);
   history.push(msg);
-  if (history.length > MAX_HISTORY) history.shift();  // 保持最近 MAX_HISTORY 条
+  if (history.length > MAX_HISTORY) history.shift();
 }
 
 function containsLinkOrMention(text) {
@@ -112,19 +105,29 @@ function formatUserIdentity(user) {
   return `${name || "Unknown User"} (no username)`;
 }
 
+// ---------------------
+// 通知管理员（只私聊已启动机器人的管理员）
+// ---------------------
 async function notifyAdminsOfSpammer(bot, user) {
   try {
     const admins = await bot.api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
     const userIdentity = formatUserIdentity(user);
+
     for (const admin of adminUsers) {
-      await bot.api.sendMessage(
-        admin.user.id,
-        `🚨 User ${userIdentity} may be spamming, exceeded 3 times!`
-      );
+      try {
+        await bot.api.sendMessage(admin.user.id, `🚨 User ${userIdentity} may be spamming, exceeded 3 times!`);
+      } catch (err) {
+        if (err.error_code === 403) {
+          // 未私聊的管理员静默跳过
+          console.log(`Admin ${admin.user.id} has not started bot, skipping notification`);
+        } else {
+          console.log(`Failed to notify admin ${admin.user.id}:`, err.message);
+        }
+      }
     }
   } catch (err) {
-    console.log("Failed to notify admins of spammer:", err.message);
+    console.log("Failed to get chat administrators:", err.message);
   }
 }
 
@@ -133,7 +136,6 @@ async function notifyAdminsOfSpammer(bot, user) {
 // ---------------------
 async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null, forceForward = false) {
   const msg = ctx.message;
-
   if (!forceForward && forwardedMessages.has(msg.message_id)) return;
   markMessageForwarded(msg.message_id);
 
@@ -141,7 +143,7 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
 
-    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length-1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.audio) sent = await ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
@@ -173,17 +175,16 @@ bots.forEach(bot => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
+    const userId = getUserId(ctx.from.id);
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
-    const userId = getUserId(ctx.from.id);
-
     if (isAdmin) return;
 
-    try { await ctx.deleteMessage(); } catch {}
-
+    // 屏蔽词检查
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
+    // 计数 + 私聊通知管理员
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
@@ -192,6 +193,7 @@ bots.forEach(bot => {
         await notifyAdminsOfSpammer(bot, ctx.from);
       }
 
+      // 审核逻辑
       try {
         const admins = await bot.api.getChatAdministrators(chatId);
         const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -205,17 +207,15 @@ bots.forEach(bot => {
           );
           pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
         }
-      } catch (err) {
-        console.log("Failed to send private review:", err.message);
-      }
-      return;
+      } catch {}
+      return; // 不匿名转发
     }
 
+    // 删除消息
+    try { await ctx.deleteMessage(); } catch {}
+
+    // 匿名转发
     await forwardMessage(ctx, userId);
-
-    if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
-      await forwardMessage(ctx, userId, msg.chat.id);
-    }
   });
 });
 
