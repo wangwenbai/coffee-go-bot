@@ -106,7 +106,7 @@ function formatUserIdentity(user) {
 }
 
 // ---------------------
-// 通知管理员（只私聊已启动机器人的管理员）
+// 通知管理员
 // ---------------------
 async function notifyAdminsOfSpammer(bot, user) {
   try {
@@ -168,15 +168,12 @@ app.use(express.json());
 const port = process.env.PORT || 3000;
 
 // ---------------------
-// 创建机器人实例 + 独立 webhook
+// 创建机器人实例 + webhook
 // ---------------------
 const bots = BOT_TOKENS.map(token => {
   const bot = new Bot(token);
   const path = `/bot${token}`;
 
-  // ---------------------
-  // 群消息处理
-  // ---------------------
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
@@ -184,48 +181,53 @@ const bots = BOT_TOKENS.map(token => {
     const userId = getUserId(ctx.from.id);
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
-    if (isAdmin) return;
 
-    // 每个机器人都先删除消息
-    try { await ctx.deleteMessage(); } catch {}
+    if (!isAdmin) {
+      // ✅ 每个机器人都删除消息
+      try { await ctx.deleteMessage(); } catch {}
 
-    const textToCheck = msg.text || msg.caption;
-    if (containsBlockedKeyword(textToCheck)) return;
+      const textToCheck = msg.text || msg.caption;
+      if (containsBlockedKeyword(textToCheck)) return;
 
-    // 链接/@ → 私聊管理员
-    if (containsLinkOrMention(textToCheck)) {
-      const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
-      adCountMap.set(ctx.from.id, currentCount);
-      if (currentCount > 3 && !notifiedUsers.has(ctx.from.id)) {
-        notifiedUsers.add(ctx.from.id);
-        await notifyAdminsOfSpammer(bot, ctx.from);
+      // 链接/@ → 管理员通知
+      if (containsLinkOrMention(textToCheck)) {
+        const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
+        adCountMap.set(ctx.from.id, currentCount);
+        if (currentCount > 3 && !notifiedUsers.has(ctx.from.id)) {
+          notifiedUsers.add(ctx.from.id);
+          await notifyAdminsOfSpammer(bot, ctx.from);
+        }
+
+        try {
+          const admins = await bot.api.getChatAdministrators(chatId);
+          const adminUsers = admins.filter(a => !a.user.is_bot);
+          for (const admin of adminUsers) {
+            const keyboard = new InlineKeyboard()
+              .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
+              .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
+            const sentMsg = await bot.api.sendMessage(admin.user.id,
+              `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
+              { reply_markup: keyboard }
+            );
+            pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
+          }
+        } catch {}
+        return;
       }
 
-      try {
-        const admins = await bot.api.getChatAdministrators(chatId);
-        const adminUsers = admins.filter(a => !a.user.is_bot);
-        for (const admin of adminUsers) {
-          const keyboard = new InlineKeyboard()
-            .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
-            .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-          const sentMsg = await bot.api.sendMessage(admin.user.id,
-            `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
-            { reply_markup: keyboard }
-          );
-          pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
-        }
-      } catch {}
-      return;
+      // 普通匿名转发（去重只影响转发）
+      await forwardMessage(ctx, userId);
     }
-
-    // 普通匿名转发（去重只影响转发，不影响删除）
-    await forwardMessage(ctx, userId);
   });
 
-  // ---------------------
-  // 回调查询处理
-  // ---------------------
+  // 回调查询（审核按钮）
   bot.on("callback_query:data", async ctx => {
+    const userIdClicker = ctx.from.id;
+    const member = await bot.api.getChatMember(chatId, userIdClicker);
+    if (!(member.status === "administrator" || member.status === "creator")) {
+      return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
+    }
+
     const data = ctx.callbackQuery.data.split(":");
     const action = data[0];
     const origMsgId = parseInt(data[1]);
@@ -233,12 +235,11 @@ const bots = BOT_TOKENS.map(token => {
 
     const pendingKeys = Array.from(pendingMessages.keys())
       .filter(key => key.startsWith(`${origMsgId}:`));
-
     if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
 
     try {
       if (action === "approve") {
-        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId, chatId, null, true);
+        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
         await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
       } else if (action === "reject") {
         await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
@@ -253,12 +254,10 @@ const bots = BOT_TOKENS.map(token => {
         } catch {}
         pendingMessages.delete(key);
       }));
-    } catch {}
+    } catch (err) { console.log("Error handling callback:", err.message); }
   });
 
-  // ---------------------
   // 用户退群清理
-  // ---------------------
   bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
     const userId = ctx.chatMember.new_chat_member.user.id;
@@ -273,21 +272,16 @@ const bots = BOT_TOKENS.map(token => {
     }
   });
 
-  // ---------------------
-  // Webhook 路径注册
-  // ---------------------
+  // Webhook 注册
   app.post(path, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
 
   return bot;
 });
 
-// ---------------------
 // 启动 Express
-// ---------------------
 app.get("/", (req, res) => res.send("Bot running"));
 app.listen(port, async () => {
   console.log(`Listening on port ${port}`);
-
   if (!process.env.RENDER_EXTERNAL_URL) return;
 
   await Promise.all(bots.map(async bot => {
