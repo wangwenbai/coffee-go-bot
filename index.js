@@ -11,6 +11,8 @@ dotenv.config();
 const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean); // 多机器人
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
+const MAX_HISTORY = parseInt(process.env.MAX_HISTORY) || 50;           // 每个用户历史消息最大条数
+const MAX_FORWARDED = parseInt(process.env.MAX_FORWARDED) || 1000;    // 去重队列最大长度
 
 // ---------------------
 // 全局存储
@@ -24,9 +26,8 @@ const adCountMap = new Map();
 const notifiedUsers = new Set();    
 
 // ---------------------
-// 全局消息去重 Set（最近 N 条）
+// 去重队列
 // ---------------------
-const MAX_FORWARDED = 1000;
 const forwardedMessages = new Set();
 const forwardedQueue = [];
 
@@ -42,13 +43,21 @@ function markMessageForwarded(msgId) {
 }
 
 // ---------------------
-// 屏蔽词逻辑
+// 屏蔽词逻辑（优化为单个正则）
 // ---------------------
 let blockedKeywords = [];
+let blockedRegex = null;
+
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
     blockedKeywords = data.split('\n').map(w => w.trim()).filter(Boolean);
+    if (blockedKeywords.length > 0) {
+      const pattern = blockedKeywords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      blockedRegex = new RegExp(pattern, 'i');
+    } else {
+      blockedRegex = null;
+    }
     console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
     console.log("Failed to load blocked keywords:", err.message);
@@ -56,6 +65,11 @@ function loadBlockedKeywords() {
 }
 loadBlockedKeywords();
 fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
+
+function containsBlockedKeyword(text) {
+  if (!text || !blockedRegex) return false;
+  return blockedRegex.test(text);
+}
 
 // ---------------------
 // 工具函数
@@ -80,13 +94,9 @@ function getUserId(userId) {
 
 function saveUserMessage(userId, msg) {
   if (!userHistory.has(userId)) userHistory.set(userId, []);
-  userHistory.get(userId).push(msg);
-}
-
-function containsBlockedKeyword(text) {
-  if (!text) return false;
-  const lowerText = text.toLowerCase();
-  return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
+  const history = userHistory.get(userId);
+  history.push(msg);
+  if (history.length > MAX_HISTORY) history.shift();  // 保持最近 MAX_HISTORY 条
 }
 
 function containsLinkOrMention(text) {
@@ -124,7 +134,6 @@ async function notifyAdminsOfSpammer(bot, user) {
 async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null, forceForward = false) {
   const msg = ctx.message;
 
-  // 去重处理，除非是管理员审核强制转发
   if (!forceForward && forwardedMessages.has(msg.message_id)) return;
   markMessageForwarded(msg.message_id);
 
@@ -168,17 +177,13 @@ bots.forEach(bot => {
     const isAdmin = member.status === "administrator" || member.status === "creator";
     const userId = getUserId(ctx.from.id);
 
-    // 管理员消息不匿名
     if (isAdmin) return;
 
-    // 删除普通用户消息
     try { await ctx.deleteMessage(); } catch {}
 
-    // 屏蔽词检查
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
-    // 链接或@ → 私聊管理员审核
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
@@ -206,10 +211,8 @@ bots.forEach(bot => {
       return;
     }
 
-    // 匿名转发到主群
     await forwardMessage(ctx, userId);
 
-    // 如果是频道消息，转发到讨论群
     if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
       await forwardMessage(ctx, userId, msg.chat.id);
     }
@@ -239,14 +242,12 @@ bots.forEach(bot => {
 
     try {
       if (action === "approve") {
-        // 强制转发审核通过消息，绕过去重
         await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId, chatId, null, true);
         await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
       } else if (action === "reject") {
         await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
       }
 
-      // 编辑所有通知消息并删除 pending
       await Promise.all(pendingKeys.map(async key => {
         const pending = pendingMessages.get(key);
         try {
