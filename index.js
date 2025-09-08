@@ -17,13 +17,13 @@ const MAX_FORWARDED = parseInt(process.env.MAX_FORWARDED) || 1000;
 // ---------------------
 // 全局存储
 // ---------------------
-const userMap = new Map();         
-const userHistory = new Map();     
-const messageMap = new Map();      
-const pendingMessages = new Map(); 
-const usedNicknames = new Set();   
-const adCountMap = new Map();      
-const notifiedUsers = new Set();   
+const userMap = new Map();
+const userHistory = new Map();
+const messageMap = new Map();
+const pendingMessages = new Map();
+const usedNicknames = new Set();
+const adCountMap = new Map();
+const notifiedUsers = new Set();
 
 // 去重队列
 const forwardedMessages = new Set();
@@ -133,9 +133,9 @@ async function notifyAdminsOfSpammer(bot, user) {
 // ---------------------
 // 消息转发
 // ---------------------
-async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null, forceForward = false) {
+async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null, skipDedup = false) {
   const msg = ctx.message;
-  if (!forceForward && forwardedMessages.has(msg.message_id)) return;
+  if (!skipDedup && forwardedMessages.has(msg.message_id)) return;
   markMessageForwarded(msg.message_id);
 
   let sent;
@@ -186,9 +186,13 @@ const bots = BOT_TOKENS.map(token => {
     const isAdmin = member.status === "administrator" || member.status === "creator";
     if (isAdmin) return;
 
+    // 每个机器人都先删除消息
+    try { await ctx.deleteMessage(); } catch {}
+
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
+    // 链接/@ → 私聊管理员
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
@@ -214,7 +218,7 @@ const bots = BOT_TOKENS.map(token => {
       return;
     }
 
-    try { await ctx.deleteMessage(); } catch {}
+    // 普通匿名转发（去重只影响转发，不影响删除）
     await forwardMessage(ctx, userId);
   });
 
@@ -222,12 +226,6 @@ const bots = BOT_TOKENS.map(token => {
   // 回调查询处理
   // ---------------------
   bot.on("callback_query:data", async ctx => {
-    const userIdClicker = ctx.from.id;
-    const member = await bot.api.getChatMember(chatId, userIdClicker);
-    if (!(member.status === "administrator" || member.status === "creator")) {
-      return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
-    }
-
     const data = ctx.callbackQuery.data.split(":");
     const action = data[0];
     const origMsgId = parseInt(data[1]);
@@ -284,7 +282,7 @@ const bots = BOT_TOKENS.map(token => {
 });
 
 // ---------------------
-// 启动 webhook
+// 启动 Express
 // ---------------------
 app.get("/", (req, res) => res.send("Bot running"));
 app.listen(port, async () => {
