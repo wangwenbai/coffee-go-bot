@@ -19,9 +19,11 @@ const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-const usedNicknames = new Set();    
-const adCountMap = new Map();       
-const notifiedUsers = new Set();    
+const usedNicknames = new Set();
+const adCountMap = new Map();       // 违规计数
+const notifiedUsers = new Set();    // 已通知管理员的用户
+
+let robotIndex = 0; // 用于轮询机器人处理
 
 // ---------------------
 // 屏蔽词逻辑
@@ -84,7 +86,10 @@ function formatUserIdentity(user) {
   return `${name || "Unknown User"} (no username)`;
 }
 
-async function notifyAdminsOfSpammer(bot, user) {
+// ---------------------
+// 通知管理员
+// ---------------------
+async function notifyAdminsOfSpammer(bot, user, text) {
   try {
     const admins = await bot.api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -93,14 +98,16 @@ async function notifyAdminsOfSpammer(bot, user) {
       try {
         await bot.api.sendMessage(
           admin.user.id,
-          `🚨 User ${userIdentity} may be spamming, exceeded 1 time!`
+          `🚨 User ${userIdentity} sent a message containing a link or mention.\nContent: ${text || "[Non-text]"}`
         );
-      } catch {
-        // 管理员没有和机器人私聊过，会失败，忽略
+      } catch (err) {
+        if (err.response?.description?.includes("bot can't initiate conversation")) {
+          // 管理员未私聊机器人，跳过
+        } else console.log("Failed to notify admin:", err.message);
       }
     }
   } catch (err) {
-    console.log("Failed to notify admins of spammer:", err.message);
+    console.log("Failed to notify admins:", err.message);
   }
 }
 
@@ -112,7 +119,6 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
-
     if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
@@ -135,18 +141,6 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
 // 创建机器人实例
 // ---------------------
 const bots = BOT_TOKENS.map(token => new Bot(token));
-
-// ---------------------
-// 轮询索引
-// ---------------------
-let botIndex = 0;
-function getNextBot() {
-  const bot = bots[botIndex];
-  botIndex = (botIndex + 1) % bots.length;
-  return bot;
-}
-
-// 初始化机器人
 await Promise.all(bots.map(b => b.init()));
 
 // ---------------------
@@ -154,105 +148,42 @@ await Promise.all(bots.map(b => b.init()));
 // ---------------------
 bots.forEach(bot => {
   bot.on("message", async ctx => {
+    const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
-
-    // 轮到哪个机器人处理
-    const assignedBot = getNextBot();
-    if (assignedBot.token !== bot.token) return; // 其他机器人跳过
 
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
     const userId = getUserId(ctx.from.id);
 
-    // 管理员消息不匿名转发
+    // 管理员消息不匿名转发，不删除
     if (isAdmin) return;
 
-    // 删除普通用户消息
-    try { await ctx.deleteMessage(); } catch {}
+    const textToCheck = msg.text || msg.caption;
 
-    // 屏蔽词检查
-    const textToCheck = ctx.message.text || ctx.message.caption;
-    if (containsBlockedKeyword(textToCheck)) return;
-
-    // 链接或@ → 私聊管理员审核
+    // ----------------- 违规通知 -----------------
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
-      if (currentCount >= 1 && !notifiedUsers.has(ctx.from.id)) {
+      if (!notifiedUsers.has(ctx.from.id)) {
         notifiedUsers.add(ctx.from.id);
-        await notifyAdminsOfSpammer(bot, ctx.from);
+        await notifyAdminsOfSpammer(bot, ctx.from, textToCheck);
       }
     }
 
-    // 匿名转发到主群
+    // ----------------- 屏蔽词检查 -----------------
+    if (containsBlockedKeyword(textToCheck)) return;
+
+    // ----------------- 轮询删除与转发 -----------------
+    const currentBot = bots[robotIndex];
+    if (bot.token !== currentBot.token) return; // 轮到其他机器人处理
+
+    // 删除原消息
+    try { await ctx.deleteMessage(); } catch {}
+
+    // 匿名转发
     await forwardMessage(ctx, userId);
 
-    // 如果是频道消息，转发到讨论群
-    if (ctx.message.forward_from_chat && ctx.message.forward_from_chat.type === "channel") {
-      await forwardMessage(ctx, userId, ctx.message.chat.id);
-    }
-  });
-});
-
-// ---------------------
-// 回调查询（审核按钮）
-// ---------------------
-bots.forEach(bot => {
-  bot.on("callback_query:data", async ctx => {
-    const userIdClicker = ctx.from.id;
-    const member = await bot.api.getChatMember(chatId, userIdClicker);
-    if (!(member.status === "administrator" || member.status === "creator")) {
-      return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
-    }
-
-    const data = ctx.callbackQuery.data.split(":");
-    const action = data[0];
-    const origMsgId = parseInt(data[1]);
-    const origUserId = parseInt(data[2]);
-
-    const pendingKeys = Array.from(pendingMessages.keys())
-      .filter(key => key.startsWith(`${origMsgId}:`));
-
-    if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
-
-    try {
-      if (action === "approve") {
-        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
-        await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
-      } else if (action === "reject") {
-        await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
-      }
-
-      // 编辑所有通知消息并删除 pending
-      await Promise.all(pendingKeys.map(async key => {
-        const pending = pendingMessages.get(key);
-        try {
-          await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
-            { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
-          );
-        } catch {}
-        pendingMessages.delete(key);
-      }));
-    } catch (err) { console.log("Error handling callback:", err.message); }
-  });
-});
-
-// ---------------------
-// 用户退群清理
-// ---------------------
-bots.forEach(bot => {
-  bot.on("chat_member", async ctx => {
-    const status = ctx.chatMember.new_chat_member.status;
-    const userId = ctx.chatMember.new_chat_member.user.id;
-    if (status === "left" || status === "kicked") {
-      const nickname = userMap.get(userId);
-      if (nickname) usedNicknames.delete(nickname);
-      userMap.delete(userId);
-      userHistory.delete(userId);
-      adCountMap.delete(userId);
-      notifiedUsers.delete(userId);
-      console.log(`Removed anonymous ID for user ${userId}`);
-    }
+    robotIndex = (robotIndex + 1) % bots.length; // 轮询下一个机器人
   });
 });
 
