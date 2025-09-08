@@ -18,16 +18,17 @@ const prefix = process.env.NICK_PREFIX || "User";
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // `${origMsgId}` => { ctx, userId, notifMsgIds: [msgId], chatIds: [adminId] }
+const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 const usedNicknames = new Set();
 const adCountMap = new Map();
-const adminSet = new Set();         // 所有已私聊机器人管理员 ID
-let blockedKeywords = [];
-let roundRobinIndex = 0;            // 多机器人轮询
+const notifiedUsers = new Set();
+const processingMessageIds = new Set(); // 避免多机器人重复处理
+let roundRobinIndex = 0;
 
 // ---------------------
 // 屏蔽词逻辑
 // ---------------------
+let blockedKeywords = [];
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
@@ -86,28 +87,39 @@ function formatUserIdentity(user) {
 }
 
 // ---------------------
+// 获取所有已私聊的管理员
+// ---------------------
+async function getAdminIds(bot) {
+  try {
+    const admins = await bot.api.getChatAdministrators(chatId);
+    return admins.filter(a => !a.user.is_bot).map(a => a.user.id);
+  } catch (err) {
+    console.log("Failed to get chat administrators:", err.message);
+    return [];
+  }
+}
+
+// ---------------------
 // 消息转发
 // ---------------------
 async function forwardMessage(bot, ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
-  let caption = msg.caption || msg.text || "";
-  caption = `【${userId}】 ${caption}`;
-
+  let sent;
   try {
-    let sendPromises = [];
-    if (msg.photo) sendPromises.push(ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.video) sendPromises.push(ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.document) sendPromises.push(ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.audio) sendPromises.push(ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.voice) sendPromises.push(ctx.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.animation) sendPromises.push(ctx.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.sticker) sendPromises.push(ctx.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.location) sendPromises.push(ctx.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined }));
-    else if (msg.poll) sendPromises.push(ctx.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined }));
-    else sendPromises.push(ctx.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined }));
+    const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
 
-    const results = await Promise.all(sendPromises);
-    if (results.length) messageMap.set(msg.message_id, results[0].message_id);
+    if (msg.photo) sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.video) sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.document) sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.audio) sent = await bot.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.voice) sent = await bot.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.animation) sent = await bot.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.sticker) sent = await bot.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.location) sent = await bot.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.poll) sent = await bot.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
+    else sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
+
+    if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
   } catch (err) {
     console.log("Forward message error:", err.message);
@@ -121,102 +133,99 @@ const bots = BOT_TOKENS.map(token => new Bot(token));
 await Promise.all(bots.map(b => b.init()));
 
 // ---------------------
-// 群消息处理
-// ---------------------
+// 群消息处理（单机器人轮询处理）
+const roundRobinLock = { index: 0 }; // 轮询锁
 bots.forEach(bot => {
   bot.on("message", async ctx => {
     const msg = ctx.message;
-    if (ctx.chat.type === "private" || ctx.from.is_bot) {
-      // 私聊机器人 -> 保存管理员ID
-      adminSet.add(ctx.from.id);
-      return;
-    }
-
-    const member = await bot.api.getChatMember(chatId, ctx.from.id);
-    const isAdmin = member.status === "administrator" || member.status === "creator";
+    if (ctx.chat.type === "private" || ctx.from.is_bot) return;
     const userId = getUserId(ctx.from.id);
 
-    // 管理员消息不匿名转发
-    if (isAdmin) return;
+    const member = await bot.api.getChatMember(chatId, ctx.from.id);
+    if (member.status === "administrator" || member.status === "creator") return;
 
-    const textToCheck = msg.text || msg.caption;
+    // 避免多机器人重复处理
+    if (processingMessageIds.has(msg.message_id)) return;
+    processingMessageIds.add(msg.message_id);
 
-    // 屏蔽词或链接/mention → 审核流程
-    if (containsBlockedKeyword(textToCheck) || containsLinkOrMention(textToCheck)) {
-      const key = `${msg.message_id}`;
-      if (!pendingMessages.has(key)) {
-        const notifMsgIds = [];
-        const chatIds = [];
-        for (const adminId of adminSet) {
-          try {
-            const keyboard = new InlineKeyboard()
-              .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
-              .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-            const sentMsg = await bot.api.sendMessage(adminId,
-              `User ${ctx.from.first_name} (${userId}) sent a message containing a link, mention, or blocked word.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
-              { reply_markup: keyboard }
-            );
-            notifMsgIds.push(sentMsg.message_id);
-            chatIds.push(adminId);
-          } catch (err) { /* 机器人无法发起私聊则忽略 */ }
+    try {
+      const textToCheck = msg.text || msg.caption;
+
+      // 链接或 @ → 违规审批
+      if (containsLinkOrMention(textToCheck)) {
+        const admins = await getAdminIds(bot);
+        for (const adminId of admins) {
+          const keyboard = new InlineKeyboard()
+            .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
+            .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
+          const sentMsg = await bot.api.sendMessage(adminId,
+            `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove or reject.`,
+            { reply_markup: keyboard }
+          );
+          pendingMessages.set(`${msg.message_id}:${adminId}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: adminId });
         }
-        pendingMessages.set(key, { ctx, userId, notifMsgIds, chatIds });
+        try { await ctx.deleteMessage(); } catch {}
+        return;
       }
-      try { await ctx.deleteMessage(); } catch {}
-      return;
-    }
 
-    // 正常消息 → 轮询机器人转发
-    const robot = bots[roundRobinIndex % bots.length];
-    roundRobinIndex++;
-    try { await ctx.deleteMessage(); } catch {}
-    await forwardMessage(robot, ctx, userId);
+      // 普通消息删除并轮询转发
+      try { await ctx.deleteMessage(); } catch {}
+      const robot = bots[roundRobinLock.index % bots.length];
+      roundRobinLock.index++;
+      await forwardMessage(robot, ctx, userId);
+
+    } finally {
+      processingMessageIds.delete(msg.message_id);
+    }
   });
 });
 
 // ---------------------
 // 回调查询（审批按钮）
-// ---------------------
 bots.forEach(bot => {
   bot.on("callback_query:data", async ctx => {
-    const data = ctx.callbackQuery.data.split(":");
-    const action = data[0];
-    const origMsgId = data[1];
-    const origUserId = data[2];
-
-    if (!pendingMessages.has(origMsgId)) {
-      return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
-    }
-
-    const pending = pendingMessages.get(origMsgId);
-    const member = await bot.api.getChatMember(chatId, ctx.from.id);
+    const userIdClicker = ctx.from.id;
+    const member = await bot.api.getChatMember(chatId, userIdClicker);
     if (!(member.status === "administrator" || member.status === "creator")) {
       return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
     }
 
+    const data = ctx.callbackQuery.data.split(":");
+    const action = data[0];
+    const origMsgId = parseInt(data[1]);
+    const origUserId = parseInt(data[2]);
+
+    const pendingKeys = Array.from(pendingMessages.keys())
+      .filter(key => key.startsWith(`${origMsgId}:`));
+
+    if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
+
     try {
       if (action === "approve") {
-        const robot = bots[roundRobinIndex % bots.length];
-        roundRobinIndex++;
-        await forwardMessage(robot, pending.ctx, pending.userId);
+        const pending = pendingMessages.get(pendingKeys[0]);
+        await forwardMessage(bot, pending.ctx, pending.userId);
         await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
-      } else {
+      } else if (action === "reject") {
         await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
       }
 
-      // 编辑所有通知消息 → 已处理
-      await Promise.all(pending.chatIds.map((adminId, idx) =>
-        bot.api.editMessageReplyMarkup(adminId, pending.notifMsgIds[idx], { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") })
-          .catch(() => {})
-      ));
-      pendingMessages.delete(origMsgId);
-    } catch (err) { console.log("Callback handling error:", err.message); }
+      // 编辑所有通知消息并删除 pending
+      await Promise.all(pendingKeys.map(async key => {
+        const pending = pendingMessages.get(key);
+        try {
+          await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+            { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
+          );
+        } catch {}
+        pendingMessages.delete(key);
+      }));
+
+    } catch (err) { console.log("Error handling callback:", err.message); }
   });
 });
 
 // ---------------------
 // 用户退群清理
-// ---------------------
 bots.forEach(bot => {
   bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
@@ -227,13 +236,14 @@ bots.forEach(bot => {
       userMap.delete(userId);
       userHistory.delete(userId);
       adCountMap.delete(userId);
+      notifiedUsers.delete(userId);
+      console.log(`Removed anonymous ID for user ${userId}`);
     }
   });
 });
 
 // ---------------------
 // Express Webhook
-// ---------------------
 const app = express();
 const port = process.env.PORT || 3000;
 app.use(express.json());
