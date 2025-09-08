@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot } from "grammy";
 import dotenv from "dotenv";
 import fs from "fs";
 import express from "express";
@@ -8,7 +8,7 @@ dotenv.config();
 // ---------------------
 // 环境变量
 // ---------------------
-const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean); // 多机器人
+const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean);
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
 
@@ -18,17 +18,15 @@ const prefix = process.env.NICK_PREFIX || "User";
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-const usedNicknames = new Set();
-const adCountMap = new Map();       // 违规计数
+const adCountMap = new Map();       // 用户违规计数
 const notifiedUsers = new Set();    // 已通知管理员的用户
+const usedNicknames = new Set();    // 已用匿名昵称
 
-let robotIndex = 0; // 用于轮询机器人处理
-
-// ---------------------
-// 屏蔽词逻辑
-// ---------------------
 let blockedKeywords = [];
+
+// ---------------------
+// 加载屏蔽词
+// ---------------------
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
@@ -80,20 +78,12 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
-function formatUserIdentity(user) {
-  if (user.username) return `@${user.username}`;
-  const name = [user.first_name, user.last_name].filter(Boolean).join(" ");
-  return `${name || "Unknown User"} (no username)`;
-}
-
-// ---------------------
-// 通知管理员
-// ---------------------
 async function notifyAdminsOfSpammer(bot, user, text) {
   try {
     const admins = await bot.api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
-    const userIdentity = formatUserIdentity(user);
+    const userIdentity = `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown User";
+
     for (const admin of adminUsers) {
       try {
         await bot.api.sendMessage(
@@ -101,13 +91,11 @@ async function notifyAdminsOfSpammer(bot, user, text) {
           `🚨 User ${userIdentity} sent a message containing a link or mention.\nContent: ${text || "[Non-text]"}`
         );
       } catch (err) {
-        if (err.response?.description?.includes("bot can't initiate conversation")) {
-          // 管理员未私聊机器人，跳过
-        } else console.log("Failed to notify admin:", err.message);
+        // 忽略无法发送的管理员（403 等）
       }
     }
   } catch (err) {
-    console.log("Failed to notify admins:", err.message);
+    console.log("Failed to notify admins of spammer:", err.message);
   }
 }
 
@@ -119,6 +107,7 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
+
     if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
@@ -144,6 +133,11 @@ const bots = BOT_TOKENS.map(token => new Bot(token));
 await Promise.all(bots.map(b => b.init()));
 
 // ---------------------
+// 多机器人轮询索引
+// ---------------------
+let robotIndex = 0;
+
+// ---------------------
 // 群消息处理
 // ---------------------
 bots.forEach(bot => {
@@ -155,35 +149,50 @@ bots.forEach(bot => {
     const isAdmin = member.status === "administrator" || member.status === "creator";
     const userId = getUserId(ctx.from.id);
 
-    // 管理员消息不匿名转发，不删除
-    if (isAdmin) return;
+    if (isAdmin) return; // 管理员消息不处理
+
+    // 轮到当前机器人处理
+    if (bot !== bots[robotIndex]) return;
+    robotIndex = (robotIndex + 1) % bots.length;
+
+    // 删除原消息
+    try { await ctx.deleteMessage(); } catch {}
 
     const textToCheck = msg.text || msg.caption;
 
-    // ----------------- 违规通知 -----------------
+    // 屏蔽词检查
+    if (containsBlockedKeyword(textToCheck)) return;
+
+    // 链接或 @ → 立即通知管理员
     if (containsLinkOrMention(textToCheck)) {
-      const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
-      adCountMap.set(ctx.from.id, currentCount);
+      adCountMap.set(ctx.from.id, (adCountMap.get(ctx.from.id) || 0) + 1);
       if (!notifiedUsers.has(ctx.from.id)) {
         notifiedUsers.add(ctx.from.id);
         await notifyAdminsOfSpammer(bot, ctx.from, textToCheck);
       }
     }
 
-    // ----------------- 屏蔽词检查 -----------------
-    if (containsBlockedKeyword(textToCheck)) return;
-
-    // ----------------- 轮询删除与转发 -----------------
-    const currentBot = bots[robotIndex];
-    if (bot.token !== currentBot.token) return; // 轮到其他机器人处理
-
-    // 删除原消息
-    try { await ctx.deleteMessage(); } catch {}
-
-    // 匿名转发
+    // 匿名转发到主群
     await forwardMessage(ctx, userId);
+  });
+});
 
-    robotIndex = (robotIndex + 1) % bots.length; // 轮询下一个机器人
+// ---------------------
+// 用户退群清理
+// ---------------------
+bots.forEach(bot => {
+  bot.on("chat_member", async ctx => {
+    const status = ctx.chatMember.new_chat_member.status;
+    const userId = ctx.chatMember.new_chat_member.user.id;
+    if (status === "left" || status === "kicked") {
+      const nickname = userMap.get(userId);
+      if (nickname) usedNicknames.delete(nickname);
+      userMap.delete(userId);
+      userHistory.delete(userId);
+      adCountMap.delete(userId);
+      notifiedUsers.delete(userId);
+      console.log(`Removed anonymous ID for user ${userId}`);
+    }
   });
 });
 
