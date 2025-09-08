@@ -6,21 +6,36 @@ import express from "express";
 dotenv.config();
 
 // ---------------------
-// Bot 初始化
+// 多机器人初始化
 // ---------------------
-const bot = new Bot(process.env.BOT_TOKEN);
-await bot.init();
+const botTokens = process.env.BOT_TOKENS
+  ? process.env.BOT_TOKENS.split(",").map(t => t.trim())
+  : [process.env.BOT_TOKEN];
+
+const bots = botTokens.map(token => new Bot(token));
+let botIndex = 0;
+
+function getNextBot() {
+  const b = bots[botIndex];
+  botIndex = (botIndex + 1) % bots.length;
+  return b;
+}
+
+// 初始化所有 bot
+for (const b of bots) {
+  await b.init();
+}
 
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
 
-const userMap = new Map();          // telegramId => 匿名编号
-const userHistory = new Map();      // 匿名编号 => 历史消息
-const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-const usedNicknames = new Set();    // 已分配的匿名码
-const adCountMap = new Map();       // userId => 广告次数
-const notifiedUsers = new Set();    // 已通知过的用户
+const userMap = new Map();
+const userHistory = new Map();
+const messageMap = new Map();
+const pendingMessages = new Map();
+const usedNicknames = new Set();
+const adCountMap = new Map();
+const notifiedUsers = new Set();
 
 // ---------------------
 // 屏蔽词逻辑
@@ -29,15 +44,15 @@ let blockedKeywords = [];
 
 function loadBlockedKeywords() {
   try {
-    const data = fs.readFileSync('./blocked.txt', 'utf8');
-    blockedKeywords = data.split(',').map(w => w.trim()).filter(Boolean);
+    const data = fs.readFileSync("./blocked.txt", "utf8");
+    blockedKeywords = data.split(",").map(w => w.trim()).filter(Boolean);
     console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
     console.log("Failed to load blocked keywords:", err.message);
   }
 }
 loadBlockedKeywords();
-fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
+fs.watchFile("./blocked.txt", () => loadBlockedKeywords());
 
 // ---------------------
 // 工具函数
@@ -45,10 +60,12 @@ fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
 function generateRandomNickname() {
   let nickname;
   do {
-    const letters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
-                    String.fromCharCode(65 + Math.floor(Math.random() * 26));
-    const numbers = Math.floor(Math.random() * 10).toString() +
-                    Math.floor(Math.random() * 10).toString();
+    const letters =
+      String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
+      String.fromCharCode(65 + Math.floor(Math.random() * 26));
+    const numbers =
+      Math.floor(Math.random() * 10).toString() +
+      Math.floor(Math.random() * 10).toString();
     nickname = `${prefix}${letters}${numbers}`;
   } while (usedNicknames.has(nickname));
   usedNicknames.add(nickname);
@@ -89,11 +106,11 @@ function formatUserIdentity(user) {
 
 async function notifyAdminsOfSpammer(user) {
   try {
-    const admins = await bot.api.getChatAdministrators(chatId);
+    const admins = await bots[0].api.getChatAdministrators(chatId);
     const adminUsers = admins.filter(a => !a.user.is_bot);
     const userIdentity = formatUserIdentity(user);
     for (const admin of adminUsers) {
-      await bot.api.sendMessage(
+      await bots[0].api.sendMessage(
         admin.user.id,
         `🚨 用户 ${userIdentity} 疑似广告，已超过 3 次！`
       );
@@ -104,24 +121,75 @@ async function notifyAdminsOfSpammer(user) {
 }
 
 // ---------------------
-// 消息转发函数
+// 消息转发函数（轮询多个 bot）
 // ---------------------
 async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
-  try {
-    const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】: ${msg.text}` : `【${userId}】`;
+  const api = getNextBot().api;
 
-    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.audio) sent = await ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.voice) sent = await ctx.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.animation) sent = await ctx.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.sticker) sent = await ctx.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.location) sent = await ctx.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.poll) sent = await ctx.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-    else sent = await ctx.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
+  try {
+    const caption = msg.caption
+      ? `【${userId}】 ${msg.caption}`
+      : msg.text
+      ? `【${userId}】: ${msg.text}`
+      : `【${userId}】`;
+
+    if (msg.photo)
+      sent = await api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.video)
+      sent = await api.sendVideo(targetChatId, msg.video.file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.document)
+      sent = await api.sendDocument(targetChatId, msg.document.file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.audio)
+      sent = await api.sendAudio(targetChatId, msg.audio.file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.voice)
+      sent = await api.sendVoice(targetChatId, msg.voice.file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.animation)
+      sent = await api.sendAnimation(targetChatId, msg.animation.file_id, {
+        caption,
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.sticker)
+      sent = await api.sendSticker(targetChatId, msg.sticker.file_id, {
+        reply_to_message_id: replyTargetId || undefined,
+      });
+    else if (msg.location)
+      sent = await api.sendMessage(
+        targetChatId,
+        `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`,
+        { reply_to_message_id: replyTargetId || undefined }
+      );
+    else if (msg.poll)
+      sent = await api.sendPoll(
+        targetChatId,
+        msg.poll.question,
+        msg.poll.options.map(o => o.text),
+        {
+          type: msg.poll.type,
+          is_anonymous: true,
+          reply_to_message_id: replyTargetId || undefined,
+        }
+      );
+    else
+      sent = await api.sendMessage(targetChatId, caption, {
+        reply_to_message_id: replyTargetId || undefined,
+      });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
@@ -133,26 +201,24 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
 // ---------------------
 // 群消息处理
 // ---------------------
-bot.on("message", async ctx => {
+bots[0].on("message", async ctx => {
   const msg = ctx.message;
   if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
-  const member = await bot.api.getChatMember(chatId, ctx.from.id);
+  const member = await bots[0].api.getChatMember(chatId, ctx.from.id);
   const isAdmin = member.status === "administrator" || member.status === "creator";
 
   const userId = getUserId(ctx.from.id);
 
-  // 管理员消息不匿名
   if (isAdmin) return;
 
-  // 删除普通用户消息
-  try { await ctx.deleteMessage(); } catch {}
+  try {
+    await ctx.deleteMessage();
+  } catch {}
 
-  // 屏蔽词检查
   const textToCheck = msg.text || msg.caption;
   if (containsBlockedKeyword(textToCheck)) return;
 
-  // 含链接/@ → 私聊管理员审核
   if (containsLinkOrMention(textToCheck)) {
     const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
     adCountMap.set(ctx.from.id, currentCount);
@@ -163,17 +229,23 @@ bot.on("message", async ctx => {
     }
 
     try {
-      const admins = await bot.api.getChatAdministrators(chatId);
+      const admins = await bots[0].api.getChatAdministrators(chatId);
       const adminUsers = admins.filter(a => !a.user.is_bot);
       for (const admin of adminUsers) {
         const keyboard = new InlineKeyboard()
           .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
           .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-        const sentMsg = await bot.api.sendMessage(admin.user.id,
+        const sentMsg = await bots[0].api.sendMessage(
+          admin.user.id,
           `User ${ctx.from.first_name} (${userId}) sent a message containing a link or mention.\nContent: ${textToCheck || "[Non-text]"}\nApprove to forward or reject.`,
           { reply_markup: keyboard }
         );
-        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
+        pendingMessages.set(`${msg.message_id}:${admin.user.id}`, {
+          ctx,
+          userId,
+          notifMsgId: sentMsg.message_id,
+          chatId: admin.user.id,
+        });
       }
     } catch (err) {
       console.log("Failed to send private review:", err.message);
@@ -181,10 +253,8 @@ bot.on("message", async ctx => {
     return;
   }
 
-  // 匿名转发到主群
   await forwardMessage(ctx, userId);
 
-  // 同步到讨论群（如果是频道转发或讨论群）
   if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
     await forwardMessage(ctx, userId, msg.chat.id);
   }
@@ -193,9 +263,9 @@ bot.on("message", async ctx => {
 // ---------------------
 // 回调查询（审核按钮）
 // ---------------------
-bot.on("callback_query:data", async ctx => {
+bots[0].on("callback_query:data", async ctx => {
   const userIdClicker = ctx.from.id;
-  const member = await bot.api.getChatMember(chatId, userIdClicker);
+  const member = await bots[0].api.getChatMember(chatId, userIdClicker);
   if (!(member.status === "administrator" || member.status === "creator")) {
     return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
   }
@@ -203,9 +273,10 @@ bot.on("callback_query:data", async ctx => {
   const data = ctx.callbackQuery.data.split(":");
   const action = data[0];
   const origMsgId = parseInt(data[1]);
-  const origUserId = parseInt(data[2]);
 
-  const pendingKeys = Array.from(pendingMessages.keys()).filter(key => key.startsWith(`${origMsgId}:`));
+  const pendingKeys = Array.from(pendingMessages.keys()).filter(key =>
+    key.startsWith(`${origMsgId}:`)
+  );
 
   if (pendingKeys.length === 0) {
     return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
@@ -219,11 +290,12 @@ bot.on("callback_query:data", async ctx => {
       await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
     }
 
-    // 编辑所有管理员通知消息为已处理
     for (const key of pendingKeys) {
       const pending = pendingMessages.get(key);
       try {
-        await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+        await bots[0].api.editMessageReplyMarkup(
+          pending.chatId,
+          pending.notifMsgId,
           { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
         );
       } catch (err) {
@@ -239,12 +311,12 @@ bot.on("callback_query:data", async ctx => {
 // ---------------------
 // 用户退群清理
 // ---------------------
-bot.on("chat_member", async ctx => {
+bots[0].on("chat_member", async ctx => {
   const status = ctx.chatMember.new_chat_member.status;
   const userId = ctx.chatMember.new_chat_member.user.id;
   if (status === "left" || status === "kicked") {
     const nickname = userMap.get(userId);
-    if (nickname) usedNicknames.delete(nickname); // 释放匿名码
+    if (nickname) usedNicknames.delete(nickname);
     userMap.delete(userId);
     userHistory.delete(userId);
     adCountMap.delete(userId);
@@ -254,14 +326,17 @@ bot.on("chat_member", async ctx => {
 });
 
 // ---------------------
-// Express Webhook (Render)
+// Express Webhook
 // ---------------------
 const app = express();
 const port = process.env.PORT || 3000;
-const webhookPath = `/bot${process.env.BOT_TOKEN}`;
+const webhookPath = `/bot${botTokens[0]}`;
 
 app.use(express.json());
-app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
+app.post(webhookPath, (req, res) => {
+  bots[0].handleUpdate(req.body).catch(console.error);
+  res.sendStatus(200);
+});
 app.get("/", (req, res) => res.send("Bot running"));
 
 app.listen(port, async () => {
@@ -269,8 +344,8 @@ app.listen(port, async () => {
   if (!process.env.RENDER_EXTERNAL_URL) return;
   const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}${webhookPath}`;
   try {
-    await bot.api.deleteWebhook({ drop_pending_updates: true });
-    await bot.api.setWebhook(webhookUrl);
+    await bots[0].api.deleteWebhook({ drop_pending_updates: true });
+    await bots[0].api.setWebhook(webhookUrl);
     console.log(`Webhook set to ${webhookUrl}`);
   } catch (err) {
     console.log("Webhook setup failed:", err.message);
