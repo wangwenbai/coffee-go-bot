@@ -1,30 +1,42 @@
 import { Bot, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import fs from "fs";
+import express from "express";
 
 dotenv.config();
 
-const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim());
+// ---------------------
+// 多机器人初始化
+// ---------------------
+if (!process.env.BOT_TOKENS) throw new Error("Missing BOT_TOKENS environment variable");
+const tokens = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean);
+if (tokens.length === 0) throw new Error("No valid BOT_TOKENS found");
+
+const bots = tokens.map(t => new Bot(t));
+for (const bot of bots) await bot.init();
+
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
 
-const userMap = new Map();
-const userHistory = new Map();
-const messageMap = new Map();
-const pendingMessages = new Map();
-const usedNicknames = new Set();
-const adCountMap = new Map();
-const notifiedUsers = new Set();
+// ---------------------
+// 全局数据
+// ---------------------
+const userMap = new Map();          // telegramId => 匿名编号
+const usedNicknames = new Set();    // 已分配的匿名码
+const userHistory = new Map();      // 匿名编号 => 历史消息
+const messageMap = new Map();       // 原始消息ID => 转发消息ID
+const pendingMessages = new Map();  // key: `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
+const adCountMap = new Map();       // userId => 广告次数
+const notifiedUsers = new Set();    // 已通知过的用户
 
 // ---------------------
 // 屏蔽词逻辑
 // ---------------------
 let blockedKeywords = [];
-
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
-    blockedKeywords = data.split("\n").map(w => w.trim()).filter(Boolean);
+    blockedKeywords = data.split(/\r?\n/).map(w => w.trim()).filter(Boolean);
     console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
     console.log("Failed to load blocked keywords:", err.message);
@@ -50,10 +62,7 @@ function generateRandomNickname() {
 }
 
 function getUserId(userId) {
-  if (!userMap.has(userId)) {
-    const nickname = generateRandomNickname();
-    userMap.set(userId, nickname);
-  }
+  if (!userMap.has(userId)) userMap.set(userId, generateRandomNickname());
   return userMap.get(userId);
 }
 
@@ -89,7 +98,7 @@ async function notifyAdminsOfSpammer(bot, user) {
     for (const admin of adminUsers) {
       await bot.api.sendMessage(
         admin.user.id,
-        `🚨 User ${userIdentity} exceeded 3 link/mention messages!`
+        `🚨 User ${userIdentity} suspected of spamming, exceeded 3 times!`
       );
     }
   } catch (err) {
@@ -106,16 +115,16 @@ async function forwardMessage(bot, ctx, userId, targetChatId = chatId, replyTarg
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】: ${msg.text}` : `【${userId}】`;
 
-    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.audio) sent = await ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.voice) sent = await ctx.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.animation) sent = await ctx.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.sticker) sent = await ctx.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.location) sent = await ctx.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
-    else if (msg.poll) sent = await ctx.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
-    else sent = await ctx.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
+    if (msg.photo) sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.video) sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.document) sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.audio) sent = await bot.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.voice) sent = await bot.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.animation) sent = await bot.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.sticker) sent = await bot.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.location) sent = await bot.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.poll) sent = await bot.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
+    else sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
@@ -125,23 +134,20 @@ async function forwardMessage(bot, ctx, userId, targetChatId = chatId, replyTarg
 }
 
 // ---------------------
-// 多机器人轮询
+// 群消息处理
 // ---------------------
-for (const token of BOT_TOKENS) {
-  const bot = new Bot(token);
-  await bot.init();
-
+for (const bot of bots) {
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
-
     const userId = getUserId(ctx.from.id);
 
     if (isAdmin) return; // 管理员消息不匿名
 
+    // 删除普通用户消息
     try { await ctx.deleteMessage(); } catch {}
 
     const textToCheck = msg.text || msg.caption;
@@ -150,7 +156,6 @@ for (const token of BOT_TOKENS) {
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
-
       if (currentCount > 3 && !notifiedUsers.has(ctx.from.id)) {
         notifiedUsers.add(ctx.from.id);
         await notifyAdminsOfSpammer(bot, ctx.from);
@@ -175,13 +180,20 @@ for (const token of BOT_TOKENS) {
       return;
     }
 
+    // 匿名转发到主群
     await forwardMessage(bot, ctx, userId);
 
+    // 如果是频道消息同步到讨论群
     if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
       await forwardMessage(bot, ctx, userId, msg.chat.id);
     }
   });
+}
 
+// ---------------------
+// 回调查询（审核按钮）
+// ---------------------
+for (const bot of bots) {
   bot.on("callback_query:data", async ctx => {
     const userIdClicker = ctx.from.id;
     const member = await bot.api.getChatMember(chatId, userIdClicker);
@@ -223,7 +235,12 @@ for (const token of BOT_TOKENS) {
       console.log("Error handling callback:", err.message);
     }
   });
+}
 
+// ---------------------
+// 用户退群清理
+// ---------------------
+for (const bot of bots) {
   bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
     const userId = ctx.chatMember.new_chat_member.user.id;
@@ -234,10 +251,39 @@ for (const token of BOT_TOKENS) {
       userHistory.delete(userId);
       adCountMap.delete(userId);
       notifiedUsers.delete(userId);
+      console.log(`Removed anonymous ID for user ${userId}`);
     }
   });
-
-  bot.start();
 }
 
-console.log("All bots started using long polling.");
+// ---------------------
+// Express Webhook
+// ---------------------
+const app = express();
+app.use(express.json());
+
+const port = process.env.PORT || 3000;
+
+// 为每个机器人注册 webhook 路径
+for (const bot of bots) {
+  const webhookPath = `/bot${bot.token}`;
+  app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
+}
+
+app.get("/", (req, res) => res.send("Bot running"));
+
+// 只监听一次端口，轮询设置所有机器人 webhook
+app.listen(port, async () => {
+  console.log(`Listening on port ${port}`);
+  if (!process.env.RENDER_EXTERNAL_URL) return;
+  for (const bot of bots) {
+    const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/bot${bot.token}`;
+    try {
+      await bot.api.deleteWebhook({ drop_pending_updates: true });
+      await bot.api.setWebhook(webhookUrl);
+      console.log(`Webhook set to ${webhookUrl}`);
+    } catch (err) {
+      console.log("Webhook setup failed:", err.message);
+    }
+  }
+});
