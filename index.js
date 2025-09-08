@@ -124,7 +124,7 @@ async function notifyAdminsOfSpammer(bot, user) {
 async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
 
-  // 去重处理
+  // 去重处理：保证匿名转发只发一次
   if (forwardedMessages.has(msg.message_id)) return;
   markMessageForwarded(msg.message_id);
 
@@ -163,10 +163,6 @@ bots.forEach(bot => {
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
-
-    // 去重处理
-    if (forwardedMessages.has(msg.message_id)) return;
-    markMessageForwarded(msg.message_id);
 
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
