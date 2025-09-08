@@ -17,18 +17,19 @@ const BLOCKED_FILE = "./blocked.txt";
 // ---------------------
 // 全局存储
 // ---------------------
-const userMap = new Map();          // telegramId => 匿名编号
-const userHistory = new Map();      // 匿名编号 => 历史消息
-const messageMap = new Map();       // 原始消息ID => 转发消息ID
-const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
-const usedNicknames = new Set();    
-const adCountMap = new Map();       
-const violationCount = new Map();   // 链接或@违规次数
+const userMap = new Map();
+const userHistory = new Map();
+const messageMap = new Map();
+const pendingMessages = new Map();
+const usedNicknames = new Set();
+const adCountMap = new Map();
+const violationCount = new Map();
+const forwardedMsgIds = new Set(); // 新增：记录已转发消息ID
 
 let dynamicAdmins = new Set();
 
 // ---------------------
-// 屏蔽词加载
+// 屏蔽词
 // ---------------------
 let blockedKeywords = [];
 function loadBlockedKeywords() {
@@ -44,7 +45,7 @@ loadBlockedKeywords();
 fs.watchFile(BLOCKED_FILE, () => loadBlockedKeywords());
 
 // ---------------------
-// 动态管理员加载/保存
+// 动态管理员
 // ---------------------
 function loadAdmins() {
   if (fs.existsSync(ADMIN_FILE)) {
@@ -106,11 +107,8 @@ async function notifyAdminsOfSpammer(userId, reason) {
     try {
       await bots[0].api.sendMessage(adminId, `⚠️ 用户 ${userId} 已违规超过3次: ${reason}`);
     } catch (err) {
-      if (err.error_code === 403) {
-        console.warn(`管理员 ${adminId} 未和机器人私聊，跳过通知`);
-      } else {
-        console.error("Notify admin failed:", err);
-      }
+      if (err.error_code === 403) console.warn(`管理员 ${adminId} 未私聊机器人，跳过通知`);
+      else console.error("Notify admin failed:", err);
     }
   }
 }
@@ -125,16 +123,18 @@ function getNextBot() {
   return bot;
 }
 
-async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetId = null) {
+async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetId = null, origMsgId = null) {
+  if (origMsgId && forwardedMsgIds.has(origMsgId)) return;
+  if (origMsgId) forwardedMsgIds.add(origMsgId);
+
   const msg = ctx.message;
-  let sent;
   const bot = getNextBot();
+  let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
-
     if (msg.photo) sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length-1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else if (msg.video) sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.document) sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
     else sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
@@ -155,7 +155,6 @@ bots.forEach(bot => {
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
-
     const userId = getUserId(ctx.from.id);
 
     // 删除普通用户消息
@@ -165,13 +164,12 @@ bots.forEach(bot => {
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
-    // 链接或@ → 违规计数 + 通知管理员
+    // 链接/@违规
     if (containsLinkOrMention(textToCheck)) {
       const count = (violationCount.get(ctx.from.id) || 0) + 1;
       violationCount.set(ctx.from.id, count);
       if (count > 3) await notifyAdminsOfSpammer(userId, "发送链接或@超过3次");
 
-      // 发送给管理员审核
       for (const adminId of dynamicAdmins) {
         try {
           const keyboard = new InlineKeyboard()
@@ -187,10 +185,10 @@ bots.forEach(bot => {
     }
 
     // 匿名转发
-    await forwardMessage(ctx, userId);
+    await forwardMessage(ctx, userId, GROUP_ID, null, msg.message_id);
   });
 
-  // 回调查询（管理员审核）
+  // 回调查询
   bot.on("callback_query:data", async ctx => {
     const data = ctx.callbackQuery.data.split(":");
     const action = data[0];
@@ -202,7 +200,8 @@ bots.forEach(bot => {
 
     try {
       if (action === "approve") {
-        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
+        const pending = pendingMessages.get(pendingKeys[0]);
+        await forwardMessage(pending.ctx, pending.userId, GROUP_ID, null, origMsgId);
         await ctx.answerCallbackQuery({ text: "已通过", show_alert: true });
       } else if (action === "reject") {
         await ctx.answerCallbackQuery({ text: "已拒绝", show_alert: true });
@@ -217,7 +216,7 @@ bots.forEach(bot => {
     } catch {}
   });
 
-  // 管理员私聊注册
+  // 私聊注册管理员
   bot.command("start", async ctx => {
     if (ctx.chat.type === "private") {
       dynamicAdmins.add(ctx.from.id);
