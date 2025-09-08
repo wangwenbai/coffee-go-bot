@@ -121,11 +121,11 @@ async function notifyAdminsOfSpammer(bot, user) {
 // ---------------------
 // 消息转发
 // ---------------------
-async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
+async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null, forceForward = false) {
   const msg = ctx.message;
 
-  // 去重处理：保证匿名转发只发一次
-  if (forwardedMessages.has(msg.message_id)) return;
+  // 去重处理，除非是管理员审核强制转发
+  if (!forceForward && forwardedMessages.has(msg.message_id)) return;
   markMessageForwarded(msg.message_id);
 
   let sent;
@@ -239,7 +239,8 @@ bots.forEach(bot => {
 
     try {
       if (action === "approve") {
-        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
+        // 强制转发审核通过消息，绕过去重
+        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId, chatId, null, true);
         await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
       } else if (action === "reject") {
         await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
