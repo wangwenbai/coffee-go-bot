@@ -119,7 +119,6 @@ async function notifyAdminsOfSpammer(bot, user) {
         await bot.api.sendMessage(admin.user.id, `🚨 User ${userIdentity} may be spamming, exceeded 3 times!`);
       } catch (err) {
         if (err.error_code === 403) {
-          // 未私聊的管理员静默跳过
           console.log(`Admin ${admin.user.id} has not started bot, skipping notification`);
         } else {
           console.log(`Failed to notify admin ${admin.user.id}:`, err.message);
@@ -162,15 +161,22 @@ async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId 
 }
 
 // ---------------------
-// 创建机器人实例
+// Express Webhook
 // ---------------------
-const bots = BOT_TOKENS.map(token => new Bot(token));
-await Promise.all(bots.map(b => b.init()));
+const app = express();
+app.use(express.json());
+const port = process.env.PORT || 3000;
 
 // ---------------------
-// 群消息处理
+// 创建机器人实例 + 独立 webhook
 // ---------------------
-bots.forEach(bot => {
+const bots = BOT_TOKENS.map(token => {
+  const bot = new Bot(token);
+  const path = `/bot${token}`;
+
+  // ---------------------
+  // 群消息处理
+  // ---------------------
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
@@ -180,11 +186,9 @@ bots.forEach(bot => {
     const isAdmin = member.status === "administrator" || member.status === "creator";
     if (isAdmin) return;
 
-    // 屏蔽词检查
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
-    // 计数 + 私聊通知管理员
     if (containsLinkOrMention(textToCheck)) {
       const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
       adCountMap.set(ctx.from.id, currentCount);
@@ -193,7 +197,6 @@ bots.forEach(bot => {
         await notifyAdminsOfSpammer(bot, ctx.from);
       }
 
-      // 审核逻辑
       try {
         const admins = await bot.api.getChatAdministrators(chatId);
         const adminUsers = admins.filter(a => !a.user.is_bot);
@@ -208,21 +211,16 @@ bots.forEach(bot => {
           pendingMessages.set(`${msg.message_id}:${admin.user.id}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: admin.user.id });
         }
       } catch {}
-      return; // 不匿名转发
+      return;
     }
 
-    // 删除消息
     try { await ctx.deleteMessage(); } catch {}
-
-    // 匿名转发
     await forwardMessage(ctx, userId);
   });
-});
 
-// ---------------------
-// 回调查询（审核按钮）
-// ---------------------
-bots.forEach(bot => {
+  // ---------------------
+  // 回调查询处理
+  // ---------------------
   bot.on("callback_query:data", async ctx => {
     const userIdClicker = ctx.from.id;
     const member = await bot.api.getChatMember(chatId, userIdClicker);
@@ -257,14 +255,12 @@ bots.forEach(bot => {
         } catch {}
         pendingMessages.delete(key);
       }));
-    } catch (err) { console.log("Error handling callback:", err.message); }
+    } catch {}
   });
-});
 
-// ---------------------
-// 用户退群清理
-// ---------------------
-bots.forEach(bot => {
+  // ---------------------
+  // 用户退群清理
+  // ---------------------
   bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
     const userId = ctx.chatMember.new_chat_member.user.id;
@@ -278,24 +274,22 @@ bots.forEach(bot => {
       console.log(`Removed anonymous ID for user ${userId}`);
     }
   });
+
+  // ---------------------
+  // Webhook 路径注册
+  // ---------------------
+  app.post(path, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
+
+  return bot;
 });
 
 // ---------------------
-// Express Webhook
+// 启动 webhook
 // ---------------------
-const app = express();
-const port = process.env.PORT || 3000;
-app.use(express.json());
-
-bots.forEach(bot => {
-  const webhookPath = `/bot${bot.token}`;
-  app.post(webhookPath, (req, res) => { bot.handleUpdate(req.body).catch(console.error); res.sendStatus(200); });
-});
-
 app.get("/", (req, res) => res.send("Bot running"));
-
 app.listen(port, async () => {
   console.log(`Listening on port ${port}`);
+
   if (!process.env.RENDER_EXTERNAL_URL) return;
 
   await Promise.all(bots.map(async bot => {
