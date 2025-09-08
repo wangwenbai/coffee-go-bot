@@ -6,62 +6,40 @@ import express from "express";
 dotenv.config();
 
 // ---------------------
-// 配置
+// 环境变量
 // ---------------------
-const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean);
-const GROUP_ID = parseInt(process.env.GROUP_ID, 10);
+const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean); // 多机器人
+const GROUP_ID = process.env.GROUP_ID;
 const NICK_PREFIX = process.env.NICK_PREFIX || "User";
-const ADMIN_FILE = "./admins.json";
-const BLOCKED_FILE = "./blocked.txt";
+const PORT = process.env.PORT || 3000;
+const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 
 // ---------------------
 // 全局存储
 // ---------------------
-const userMap = new Map();
-const userHistory = new Map();
-const messageMap = new Map();
-const pendingMessages = new Map();
-const usedNicknames = new Set();
-const adCountMap = new Map();
-const violationCount = new Map();
-const forwardedMsgIds = new Set(); // 记录已转发消息ID
-
-let dynamicAdmins = new Set();
-
-// ---------------------
-// 屏蔽词
-// ---------------------
+const userMap = new Map();          // telegramId => 匿名编号
+const userHistory = new Map();      // 匿名编号 => 历史消息
+const messageMap = new Map();       // 原始消息ID => 转发消息ID
+const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
+const usedNicknames = new Set();    
+const violationCount = new Map();   // 用户违规次数
+let dynamicAdmins = new Set();      // 动态管理员
 let blockedKeywords = [];
+
+// ---------------------
+// 屏蔽词逻辑
+// ---------------------
 function loadBlockedKeywords() {
   try {
-    const data = fs.readFileSync(BLOCKED_FILE, "utf8");
-    blockedKeywords = data.split("\n").map(w => w.trim()).filter(Boolean);
+    const data = fs.readFileSync('./blocked.txt', 'utf8');
+    blockedKeywords = data.split('\n').map(w => w.trim()).filter(Boolean);
     console.log(`Blocked keywords loaded: ${blockedKeywords.length}`);
   } catch (err) {
     console.log("Failed to load blocked keywords:", err.message);
   }
 }
 loadBlockedKeywords();
-fs.watchFile(BLOCKED_FILE, () => loadBlockedKeywords());
-
-// ---------------------
-// 动态管理员
-// ---------------------
-function loadAdmins() {
-  if (fs.existsSync(ADMIN_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(ADMIN_FILE, "utf8"));
-      dynamicAdmins = new Set(data);
-      console.log("Admins loaded:", [...dynamicAdmins]);
-    } catch {}
-  }
-}
-function saveAdmins() {
-  try {
-    fs.writeFileSync(ADMIN_FILE, JSON.stringify([...dynamicAdmins], null, 2));
-  } catch (err) { console.error("Failed to save admins:", err); }
-}
-loadAdmins();
+fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
 
 // ---------------------
 // 工具函数
@@ -102,13 +80,23 @@ function containsLinkOrMention(text) {
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
+function formatUserIdentity(user) {
+  if (user.username) return `@${user.username}`;
+  const name = [user.first_name, user.last_name].filter(Boolean).join(" ");
+  return `${name || "Unknown User"} (no username)`;
+}
+
+// ---------------------
+// 违规通知管理员
+// ---------------------
 async function notifyAdminsOfSpammer(userId, reason) {
+  if (!dynamicAdmins.size) return;
+  const bot = bots[0]; // 固定第一个机器人发送通知
   for (const adminId of dynamicAdmins) {
     try {
-      await bots[0].api.sendMessage(adminId, `⚠️ 用户 ${userId} 已违规超过3次: ${reason}`);
+      await bot.api.sendMessage(adminId, `🚨 用户 ${userId} ${reason}`);
     } catch (err) {
-      if (err.error_code === 403) console.warn(`管理员 ${adminId} 未私聊机器人，跳过通知`);
-      else console.error("Notify admin failed:", err);
+      if (err.error_code === 403) console.warn(`管理员 ${adminId} 未与机器人私聊，无法通知`);
     }
   }
 }
@@ -116,42 +104,28 @@ async function notifyAdminsOfSpammer(userId, reason) {
 // ---------------------
 // 消息转发
 // ---------------------
-let botIndex = 0;
-function getNextBot() {
-  const bot = bots[botIndex];
-  botIndex = (botIndex + 1) % bots.length;
-  return bot;
-}
-
-async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetId = null, origMsgId = null) {
-  if (origMsgId && forwardedMsgIds.has(origMsgId)) return;
-  if (origMsgId) forwardedMsgIds.add(origMsgId);
-
+async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetId = null) {
   const msg = ctx.message;
-  const bot = getNextBot();
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
 
-    if (msg.photo) {
-      sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length-1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    } else if (msg.video) {
-      sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    } else if (msg.document) {
-      sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    } else if (msg.audio) {
-      sent = await bot.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    } else if (msg.voice) {
-      sent = await bot.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    } else if (msg.sticker) {
-      sent = await bot.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
-    } else {
-      sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
-    }
+    if (msg.photo) sent = await ctx.api.sendPhoto(targetChatId, msg.photo[msg.photo.length - 1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.video) sent = await ctx.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.document) sent = await ctx.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.audio) sent = await ctx.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.voice) sent = await ctx.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.animation) sent = await ctx.api.sendAnimation(targetChatId, msg.animation.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    else if (msg.sticker) sent = await ctx.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.location) sent = await ctx.api.sendMessage(targetChatId, `【${userId}】 sent location: [${msg.location.latitude}, ${msg.location.longitude}]`, { reply_to_message_id: replyTargetId || undefined });
+    else if (msg.poll) sent = await ctx.api.sendPoll(targetChatId, msg.poll.question, msg.poll.options.map(o => o.text), { type: msg.poll.type, is_anonymous: true, reply_to_message_id: replyTargetId || undefined });
+    else sent = await ctx.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
-  } catch (err) { console.error("Forward message error:", err.message); }
+  } catch (err) {
+    console.log("Forward message error:", err.message);
+  }
 }
 
 // ---------------------
@@ -167,77 +141,99 @@ bots.forEach(bot => {
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
+
+    const member = await bot.api.getChatMember(GROUP_ID, ctx.from.id);
+    const isAdmin = member.status === "administrator" || member.status === "creator";
     const userId = getUserId(ctx.from.id);
+
+    // 管理员消息不匿名且不删除
+    if (isAdmin) return;
 
     // 删除普通用户消息
     try { await ctx.deleteMessage(); } catch {}
 
-    // 屏蔽词
+    // 屏蔽词检查
     const textToCheck = msg.text || msg.caption;
     if (containsBlockedKeyword(textToCheck)) return;
 
-    // 链接/@违规
+    // 链接或@ → 私聊管理员审核
     if (containsLinkOrMention(textToCheck)) {
       const count = (violationCount.get(ctx.from.id) || 0) + 1;
       violationCount.set(ctx.from.id, count);
-      if (count > 3) await notifyAdminsOfSpammer(userId, "发送链接或@超过3次");
 
+      if (count > 3) {
+        await notifyAdminsOfSpammer(userId, "发送链接或@超过3次");
+      }
+
+      // 发送审核按钮给管理员
       for (const adminId of dynamicAdmins) {
         try {
           const keyboard = new InlineKeyboard()
             .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
             .text("❌ Reject", `reject:${msg.message_id}:${ctx.from.id}`);
-          const sentMsg = await bot.api.sendMessage(adminId,
+          const sentMsg = await bots[0].api.sendMessage(adminId,
             `用户 ${userId} 发送了链接或@，请审核:\n${textToCheck || "[Non-text]"}`,
             { reply_markup: keyboard });
           pendingMessages.set(`${msg.message_id}:${adminId}`, { ctx, userId, notifMsgId: sentMsg.message_id, chatId: adminId });
-        } catch {}
+        } catch (err) {
+          if (err.error_code === 403) console.warn(`管理员 ${adminId} 未私聊机器人，无法通知`);
+        }
       }
       return;
     }
 
-    // 匿名转发
-    await forwardMessage(ctx, userId, GROUP_ID, null, msg.message_id);
+    // 匿名转发到主群
+    await forwardMessage(ctx, userId);
   });
+});
 
-  // 回调查询
+// ---------------------
+// 回调查询（审核按钮）
+// ---------------------
+bots.forEach(bot => {
   bot.on("callback_query:data", async ctx => {
+    const userIdClicker = ctx.from.id;
+    const member = await bot.api.getChatMember(GROUP_ID, userIdClicker);
+    if (!(member.status === "administrator" || member.status === "creator")) {
+      return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
+    }
+
     const data = ctx.callbackQuery.data.split(":");
     const action = data[0];
     const origMsgId = parseInt(data[1]);
     const origUserId = parseInt(data[2]);
 
-    const pendingKeys = Array.from(pendingMessages.keys()).filter(k => k.startsWith(`${origMsgId}:`));
-    if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "已处理", show_alert: true });
+    const pendingKeys = Array.from(pendingMessages.keys())
+      .filter(key => key.startsWith(`${origMsgId}:`));
+
+    if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
 
     try {
       if (action === "approve") {
-        const pending = pendingMessages.get(pendingKeys[0]);
-        await forwardMessage(pending.ctx, pending.userId, GROUP_ID, null, origMsgId);
-        await ctx.answerCallbackQuery({ text: "已通过", show_alert: true });
+        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
+        await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
       } else if (action === "reject") {
-        await ctx.answerCallbackQuery({ text: "已拒绝", show_alert: true });
+        await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
       }
 
-      // 更新按钮状态
+      // 编辑所有通知消息并删除 pending
       await Promise.all(pendingKeys.map(async key => {
-        const p = pendingMessages.get(key);
-        try { await bot.api.editMessageReplyMarkup(p.chatId, p.notifMsgId, { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }); } catch {}
+        const pending = pendingMessages.get(key);
+        try {
+          await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+            { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
+          );
+        } catch {}
         pendingMessages.delete(key);
       }));
-    } catch {}
+    } catch (err) { console.log("Error handling callback:", err.message); }
   });
+});
 
-  // 私聊注册管理员
-  bot.command("start", async ctx => {
-    if (ctx.chat.type === "private") {
-      dynamicAdmins.add(ctx.from.id);
-      saveAdmins();
-      await ctx.reply("✅ 你已注册为管理员，将收到违规提醒。");
-    }
-  });
-
-  // 用户退群清理
+// ---------------------
+// 用户退群清理
+// ---------------------
+bots.forEach(bot => {
   bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
     const userId = ctx.chatMember.new_chat_member.user.id;
@@ -246,9 +242,18 @@ bots.forEach(bot => {
       if (nickname) usedNicknames.delete(nickname);
       userMap.delete(userId);
       userHistory.delete(userId);
-      adCountMap.delete(userId);
       violationCount.delete(userId);
+      console.log(`Removed anonymous ID for user ${userId}`);
     }
+  });
+});
+
+// ---------------------
+// /start 命令，动态注册管理员
+// ---------------------
+bots.forEach(bot => {
+  bot.command("start", ctx => {
+    if (!ctx.from.is_bot) dynamicAdmins.add(ctx.from.id);
   });
 });
 
@@ -256,7 +261,6 @@ bots.forEach(bot => {
 // Express Webhook
 // ---------------------
 const app = express();
-const port = process.env.PORT || 3000;
 app.use(express.json());
 
 bots.forEach(bot => {
@@ -266,16 +270,18 @@ bots.forEach(bot => {
 
 app.get("/", (req, res) => res.send("Bot running"));
 
-app.listen(port, async () => {
-  console.log(`Listening on port ${port}`);
-  if (!process.env.RENDER_EXTERNAL_URL) return;
+app.listen(PORT, async () => {
+  console.log(`Listening on port ${PORT}`);
+  if (!RENDER_EXTERNAL_URL) return;
 
   await Promise.all(bots.map(async bot => {
-    const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/bot${bot.token}`;
+    const webhookUrl = `${RENDER_EXTERNAL_URL}/bot${bot.token}`;
     try {
       await bot.api.deleteWebhook({ drop_pending_updates: true });
       await bot.api.setWebhook(webhookUrl);
       console.log(`Webhook set for bot ${bot.token}: ${webhookUrl}`);
-    } catch (err) { console.log(`Webhook setup failed for bot ${bot.token}:`, err.message); }
+    } catch (err) {
+      console.log(`Webhook setup failed for bot ${bot.token}:`, err.message);
+    }
   }));
 });
