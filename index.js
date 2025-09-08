@@ -24,7 +24,7 @@ const pendingMessages = new Map();
 const usedNicknames = new Set();
 const adCountMap = new Map();
 const violationCount = new Map();
-const forwardedMsgIds = new Set(); // 新增：记录已转发消息ID
+const forwardedMsgIds = new Set(); // 记录已转发消息ID
 
 let dynamicAdmins = new Set();
 
@@ -132,10 +132,22 @@ async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetI
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
-    if (msg.photo) sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length-1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else if (msg.video) sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
-    else sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
+
+    if (msg.photo) {
+      sent = await bot.api.sendPhoto(targetChatId, msg.photo[msg.photo.length-1].file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    } else if (msg.video) {
+      sent = await bot.api.sendVideo(targetChatId, msg.video.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    } else if (msg.document) {
+      sent = await bot.api.sendDocument(targetChatId, msg.document.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    } else if (msg.audio) {
+      sent = await bot.api.sendAudio(targetChatId, msg.audio.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    } else if (msg.voice) {
+      sent = await bot.api.sendVoice(targetChatId, msg.voice.file_id, { caption, reply_to_message_id: replyTargetId || undefined });
+    } else if (msg.sticker) {
+      sent = await bot.api.sendSticker(targetChatId, msg.sticker.file_id, { reply_to_message_id: replyTargetId || undefined });
+    } else {
+      sent = await bot.api.sendMessage(targetChatId, caption, { reply_to_message_id: replyTargetId || undefined });
+    }
 
     if (sent) messageMap.set(msg.message_id, sent.message_id);
     saveUserMessage(userId, msg.text || msg.caption || "[Non-text]");
