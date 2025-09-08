@@ -2,7 +2,6 @@ import { Bot, InlineKeyboard } from "grammy";
 import dotenv from "dotenv";
 import fs from "fs";
 import express from "express";
-import Redis from "ioredis";
 
 dotenv.config();
 
@@ -14,12 +13,6 @@ const GROUP_ID = process.env.GROUP_ID;
 const NICK_PREFIX = process.env.NICK_PREFIX || "User";
 const PORT = process.env.PORT || 3000;
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379";
-
-// ---------------------
-// Redis 客户端
-// ---------------------
-const redis = new Redis(REDIS_URL);
 
 // ---------------------
 // 全局存储
@@ -28,6 +21,11 @@ const userMap = new Map();
 const usedNicknames = new Set();
 let blockedKeywords = [];
 const dynamicAdmins = new Set();
+const messageLocks = new Set();      // 消息去重锁
+const notifyLocks = new Set();       // 通知去重锁
+const forwardQueue = [];             // 消息队列
+const notifyQueue = [];              // 违规通知队列
+const pendingAdmins = new Map();     // origMsgId => Set(adminMsgId)
 
 // ---------------------
 // 屏蔽词
@@ -79,61 +77,46 @@ function containsLinkOrMention(text) {
 }
 
 // ---------------------
-// 消息队列
+// 消息队列处理
 // ---------------------
-async function enqueueForward(ctx, userId) {
-  const msgKey = `msgLock:${ctx.chat.id}:${ctx.message.message_id}`;
-  const locked = await redis.set(msgKey, "1", "NX", "EX", 60); // 上锁60秒
-  if (!locked) return; // 已被其他机器人处理过
-
-  const msgStr = JSON.stringify({ chatId: GROUP_ID, message: ctx.message, userId });
-  await redis.rpush("forwardQueue", msgStr);
-}
-
 async function processForwardQueue(bot) {
-  while (true) {
-    const data = await redis.lpop("forwardQueue");
-    if (!data) break;
-    const { chatId, message, userId } = JSON.parse(data);
+  while (forwardQueue.length) {
+    const { ctx, userId } = forwardQueue.shift();
+    const msgKey = `${ctx.chat.id}:${ctx.message.message_id}`;
+    if (messageLocks.has(msgKey)) continue; // 已处理
+    messageLocks.add(msgKey);
+
     try {
-      const caption = message.caption ? `【${userId}】 ${message.caption}` : message.text ? `【${userId}】 ${message.text}` : `【${userId}】`;
-      if (message.photo) await bot.api.sendPhoto(chatId, message.photo[message.photo.length - 1].file_id, { caption });
-      else if (message.video) await bot.api.sendVideo(chatId, message.video.file_id, { caption });
-      else await bot.api.sendMessage(chatId, caption);
+      const msg = ctx.message;
+      const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
+      if (msg.photo) await ctx.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, { caption });
+      else if (msg.video) await ctx.api.sendVideo(GROUP_ID, msg.video.file_id, { caption });
+      else if (msg.document) await ctx.api.sendDocument(GROUP_ID, msg.document.file_id, { caption });
+      else if (msg.audio) await ctx.api.sendAudio(GROUP_ID, msg.audio.file_id, { caption });
+      else await ctx.api.sendMessage(GROUP_ID, caption);
     } catch (err) {
       console.log("Forward error:", err.message);
     }
   }
 }
 
-// ---------------------
-// 违规通知队列
-// ---------------------
-async function enqueueNotify(origMsgId, ctx, textToCheck, userId) {
-  const notifyKey = `notifyLock:${ctx.chat.id}:${origMsgId}`;
-  const locked = await redis.set(notifyKey, "1", "NX", "EX", 60);
-  if (!locked) return; // 已通知过
-
-  const dataStr = JSON.stringify({ origMsgId, chatId: ctx.chat.id, fromId: ctx.from.id, textToCheck, userId });
-  await redis.rpush("notifyQueue", dataStr);
-}
-
 async function processNotifyQueue(bot) {
-  while (true) {
-    const data = await redis.lpop("notifyQueue");
-    if (!data) break;
-    const { origMsgId, chatId, fromId, textToCheck, userId } = JSON.parse(data);
+  while (notifyQueue.length) {
+    const { origMsgId, ctx, textToCheck, userId } = notifyQueue.shift();
+    const notifyKey = `${ctx.chat.id}:${origMsgId}`;
+    if (notifyLocks.has(notifyKey)) continue; // 已通知
+    notifyLocks.add(notifyKey);
 
     for (const adminId of dynamicAdmins) {
       try {
         const keyboard = new InlineKeyboard()
-          .text("✅ Approve", `approve:${origMsgId}:${fromId}`)
-          .text("❌ Reject", `reject:${origMsgId}:${fromId}`);
+          .text("✅ Approve", `approve:${origMsgId}:${ctx.from.id}`)
+          .text("❌ Reject", `reject:${origMsgId}:${ctx.from.id}`);
         const msg = await bot.api.sendMessage(adminId,
           `用户 ${userId} 发送了链接或@，请审核:\n${textToCheck || "[Non-text]"}`,
           { reply_markup: keyboard });
-        // 保存 pending 数据
-        await redis.sadd(`pendingAdmins:${origMsgId}`, msg.message_id);
+        if (!pendingAdmins.has(origMsgId)) pendingAdmins.set(origMsgId, new Set());
+        pendingAdmins.get(origMsgId).add(msg.message_id);
       } catch (err) {
         if (err.error_code === 403) console.warn(`管理员 ${adminId} 未私聊机器人，无法通知`);
       }
@@ -164,19 +147,18 @@ bots.forEach(bot => {
     if (containsBlockedKeyword(textToCheck)) return;
 
     if (containsLinkOrMention(textToCheck)) {
-      const key = `violation:${ctx.from.id}`;
-      let count = parseInt(await redis.get(key) || "0") + 1;
-      await redis.set(key, count);
+      if (!ctx.from._violationCount) ctx.from._violationCount = 0;
+      ctx.from._violationCount += 1;
 
-      if (count > 3) {
-        await enqueueNotify(ctx.message.message_id, ctx, textToCheck, userId);
+      if (ctx.from._violationCount > 3) {
+        notifyQueue.push({ origMsgId: ctx.message.message_id, ctx, textToCheck, userId });
         processNotifyQueue(bot);
       }
       return;
     }
 
     if (!isAdmin) {
-      await enqueueForward(ctx, userId);
+      forwardQueue.push({ ctx, userId });
       processForwardQueue(bot);
     }
   });
@@ -190,38 +172,22 @@ bots.forEach(bot => {
     const origMsgId = parseInt(data[1]);
     const origUserId = parseInt(data[2]);
 
-    const isAdmin = (await bot.api.getChatMember(GROUP_ID, ctx.from.id)).status === "administrator" || ctx.from.id === GROUP_ID;
+    const member = await bot.api.getChatMember(GROUP_ID, ctx.from.id);
+    const isAdmin = member.status === "administrator" || member.status === "creator";
     if (!isAdmin) return ctx.answerCallbackQuery({ text: "Only admins", show_alert: true });
 
-    const pendingMsgIds = await redis.smembers(`pendingAdmins:${origMsgId}`);
-    if (!pendingMsgIds || pendingMsgIds.length === 0) return ctx.answerCallbackQuery({ text: "Already processed", show_alert: true });
-
-    // 审核操作
-    if (action === "approve") {
-      const msgKey = `msgLock:${GROUP_ID}:${origMsgId}`;
-      const locked = await redis.set(msgKey, "1", "NX", "EX", 60);
-      if (locked) {
-        // 可以转发原消息
-        const msgData = await redis.get(`origMessage:${origMsgId}`);
-        if (msgData) {
-          const { ctxObj, userId } = JSON.parse(msgData);
-          await enqueueForward(ctxObj, userId);
-          processForwardQueue(bot);
+    if (action === "approve" || action === "reject") {
+      // 更新所有管理员按钮为“已处理”
+      const processedKeyboard = new InlineKeyboard().text("✅ Processed", "processed");
+      if (pendingAdmins.has(origMsgId)) {
+        for (const msgId of pendingAdmins.get(origMsgId)) {
+          try { await bot.api.editMessageReplyMarkup(ctx.from.id, msgId, { reply_markup: processedKeyboard }); } catch {}
         }
+        pendingAdmins.delete(origMsgId);
       }
-      await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
-    } else if (action === "reject") {
-      await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
-    }
 
-    // 更新所有管理员按钮为“已处理”
-    const processedKeyboard = new InlineKeyboard().text("✅ Processed", "processed");
-    for (const msgId of pendingMsgIds) {
-      try { await bot.api.editMessageReplyMarkup(ctx.from.id, parseInt(msgId), { reply_markup: processedKeyboard }); } catch {}
+      await ctx.answerCallbackQuery({ text: action === "approve" ? "Message approved" : "Message rejected", show_alert: true });
     }
-
-    await redis.del(`pendingAdmins:${origMsgId}`);
-    await redis.del(`origMessage:${origMsgId}`);
   });
 
   // ---------------------
@@ -236,6 +202,7 @@ bots.forEach(bot => {
       userMap.delete(userId);
     }
 
+    // 动态加入管理员
     if (ctx.chatMember.new_chat_member.user && !ctx.chatMember.new_chat_member.user.is_bot) {
       dynamicAdmins.add(ctx.chatMember.new_chat_member.user.id);
     }
