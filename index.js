@@ -24,6 +24,24 @@ const adCountMap = new Map();
 const notifiedUsers = new Set();    
 
 // ---------------------
+// 全局消息去重 Set（最近 N 条）
+// ---------------------
+const MAX_FORWARDED = 1000;
+const forwardedMessages = new Set();
+const forwardedQueue = [];
+
+function markMessageForwarded(msgId) {
+  if (!forwardedMessages.has(msgId)) {
+    forwardedMessages.add(msgId);
+    forwardedQueue.push(msgId);
+    if (forwardedQueue.length > MAX_FORWARDED) {
+      const old = forwardedQueue.shift();
+      forwardedMessages.delete(old);
+    }
+  }
+}
+
+// ---------------------
 // 屏蔽词逻辑
 // ---------------------
 let blockedKeywords = [];
@@ -105,6 +123,11 @@ async function notifyAdminsOfSpammer(bot, user) {
 // ---------------------
 async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
+
+  // 去重处理
+  if (forwardedMessages.has(msg.message_id)) return;
+  markMessageForwarded(msg.message_id);
+
   let sent;
   try {
     const caption = msg.caption ? `【${userId}】 ${msg.caption}` : msg.text ? `【${userId}】 ${msg.text}` : `【${userId}】`;
@@ -140,6 +163,10 @@ bots.forEach(bot => {
   bot.on("message", async ctx => {
     const msg = ctx.message;
     if (ctx.chat.type === "private" || ctx.from.is_bot) return;
+
+    // 去重处理
+    if (forwardedMessages.has(msg.message_id)) return;
+    markMessageForwarded(msg.message_id);
 
     const member = await bot.api.getChatMember(chatId, ctx.from.id);
     const isAdmin = member.status === "administrator" || member.status === "creator";
