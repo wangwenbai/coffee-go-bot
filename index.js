@@ -8,7 +8,7 @@ dotenv.config();
 // ---------------------
 // 环境变量
 // ---------------------
-const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean);
+const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim()).filter(Boolean); // 多机器人
 const chatId = process.env.GROUP_ID;
 const prefix = process.env.NICK_PREFIX || "User";
 
@@ -17,13 +17,11 @@ const prefix = process.env.NICK_PREFIX || "User";
 // ---------------------
 const userMap = new Map();          // telegramId => 匿名编号
 const userHistory = new Map();      // 匿名编号 => 历史消息
-const processedMessages = new Set(); // messageId 已处理
 const messageMap = new Map();       // 原始消息ID => 转发消息ID
 const pendingMessages = new Map();  // `${origMsgId}:${adminId}` => { ctx, userId, notifMsgId, chatId }
 const usedNicknames = new Set();    
+const adCountMap = new Map();       
 const notifiedUsers = new Set();    
-const adminsSet = new Set();       // 私聊过机器人的管理员
-let lastBotIndex = -1;             // 多机器人轮询索引
 
 // ---------------------
 // 屏蔽词逻辑
@@ -86,30 +84,30 @@ function formatUserIdentity(user) {
   return `${name || "Unknown User"} (no username)`;
 }
 
-// ---------------------
-// 通知管理员
-// ---------------------
-async function notifyAdmins(user, text, bots) {
-  const userIdentity = formatUserIdentity(user);
-  for (const adminId of adminsSet) {
-    for (const bot of bots) {
+async function notifyAdminsOfSpammer(bot, user) {
+  try {
+    const admins = await bot.api.getChatAdministrators(chatId);
+    const adminUsers = admins.filter(a => !a.user.is_bot);
+    const userIdentity = formatUserIdentity(user);
+    for (const admin of adminUsers) {
       try {
-        const keyboard = new InlineKeyboard()
-          .text("✅ Approve", `approve:${user.id}:${Date.now()}`)
-          .text("❌ Reject", `reject:${user.id}:${Date.now()}`);
-        await bot.api.sendMessage(adminId, `🚨 User ${userIdentity} sent a message:\n${text}`, { reply_markup: keyboard });
-      } catch (err) {
-        // 私聊失败不阻塞
-        // console.log(`Failed to notify admin ${adminId}: ${err.message}`);
+        await bot.api.sendMessage(
+          admin.user.id,
+          `🚨 User ${userIdentity} may be spamming, exceeded 1 time!`
+        );
+      } catch {
+        // 管理员没有和机器人私聊过，会失败，忽略
       }
     }
+  } catch (err) {
+    console.log("Failed to notify admins of spammer:", err.message);
   }
 }
 
 // ---------------------
 // 消息转发
 // ---------------------
-async function forwardMessage(bot, ctx, userId, targetChatId = chatId, replyTargetId = null) {
+async function forwardMessage(ctx, userId, targetChatId = chatId, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
   try {
@@ -137,6 +135,18 @@ async function forwardMessage(bot, ctx, userId, targetChatId = chatId, replyTarg
 // 创建机器人实例
 // ---------------------
 const bots = BOT_TOKENS.map(token => new Bot(token));
+
+// ---------------------
+// 轮询索引
+// ---------------------
+let botIndex = 0;
+function getNextBot() {
+  const bot = bots[botIndex];
+  botIndex = (botIndex + 1) % bots.length;
+  return bot;
+}
+
+// 初始化机器人
 await Promise.all(bots.map(b => b.init()));
 
 // ---------------------
@@ -144,48 +154,43 @@ await Promise.all(bots.map(b => b.init()));
 // ---------------------
 bots.forEach(bot => {
   bot.on("message", async ctx => {
-    try {
-      const msg = ctx.message;
-      if (ctx.from.is_bot || ctx.chat.type === "private") return;
+    if (ctx.chat.type === "private" || ctx.from.is_bot) return;
 
-      // 轮询选择机器人
-      lastBotIndex = (lastBotIndex + 1) % bots.length;
-      const handlerBot = bots[lastBotIndex];
+    // 轮到哪个机器人处理
+    const assignedBot = getNextBot();
+    if (assignedBot.token !== bot.token) return; // 其他机器人跳过
 
-      const member = await handlerBot.api.getChatMember(chatId, ctx.from.id);
-      const isAdmin = member.status === "administrator" || member.status === "creator";
-      const userId = getUserId(ctx.from.id);
+    const member = await bot.api.getChatMember(chatId, ctx.from.id);
+    const isAdmin = member.status === "administrator" || member.status === "creator";
+    const userId = getUserId(ctx.from.id);
 
-      // 管理员消息不处理匿名
-      if (!isAdmin) {
-        try { await ctx.deleteMessage(); } catch {}
+    // 管理员消息不匿名转发
+    if (isAdmin) return;
+
+    // 删除普通用户消息
+    try { await ctx.deleteMessage(); } catch {}
+
+    // 屏蔽词检查
+    const textToCheck = ctx.message.text || ctx.message.caption;
+    if (containsBlockedKeyword(textToCheck)) return;
+
+    // 链接或@ → 私聊管理员审核
+    if (containsLinkOrMention(textToCheck)) {
+      const currentCount = (adCountMap.get(ctx.from.id) || 0) + 1;
+      adCountMap.set(ctx.from.id, currentCount);
+      if (currentCount >= 1 && !notifiedUsers.has(ctx.from.id)) {
+        notifiedUsers.add(ctx.from.id);
+        await notifyAdminsOfSpammer(bot, ctx.from);
       }
+    }
 
-      const textToCheck = msg.text || msg.caption;
+    // 匿名转发到主群
+    await forwardMessage(ctx, userId);
 
-      // 屏蔽词
-      if (containsBlockedKeyword(textToCheck)) return;
-
-      // 链接或 @
-      if (containsLinkOrMention(textToCheck)) {
-        if (!notifiedUsers.has(ctx.from.id)) {
-          notifiedUsers.add(ctx.from.id);
-          await notifyAdmins(ctx.from, textToCheck || "[Non-text]", bots);
-        }
-        return;
-      }
-
-      // 匿名转发
-      if (!isAdmin) {
-        await forwardMessage(handlerBot, ctx, userId);
-      }
-
-      // 如果是频道消息，转发到讨论群
-      if (msg.forward_from_chat && msg.forward_from_chat.type === "channel") {
-        await forwardMessage(handlerBot, ctx, userId, msg.chat.id);
-      }
-
-    } catch (err) { console.log("Message handling error:", err.message); }
+    // 如果是频道消息，转发到讨论群
+    if (ctx.message.forward_from_chat && ctx.message.forward_from_chat.type === "channel") {
+      await forwardMessage(ctx, userId, ctx.message.chat.id);
+    }
   });
 });
 
@@ -194,33 +199,41 @@ bots.forEach(bot => {
 // ---------------------
 bots.forEach(bot => {
   bot.on("callback_query:data", async ctx => {
-    try {
-      const data = ctx.callbackQuery.data.split(":");
-      const action = data[0];
-      const origUserId = parseInt(data[1]);
-      const pendingKeys = Array.from(pendingMessages.keys()).filter(k => k.startsWith(`${origUserId}:`));
-      if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "Processed", show_alert: true });
+    const userIdClicker = ctx.from.id;
+    const member = await bot.api.getChatMember(chatId, userIdClicker);
+    if (!(member.status === "administrator" || member.status === "creator")) {
+      return ctx.answerCallbackQuery({ text: "Only admins can approve/reject", show_alert: true });
+    }
 
+    const data = ctx.callbackQuery.data.split(":");
+    const action = data[0];
+    const origMsgId = parseInt(data[1]);
+    const origUserId = parseInt(data[2]);
+
+    const pendingKeys = Array.from(pendingMessages.keys())
+      .filter(key => key.startsWith(`${origMsgId}:`));
+
+    if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
+
+    try {
       if (action === "approve") {
-        for (const key of pendingKeys) {
-          const pending = pendingMessages.get(key);
-          await forwardMessage(bots[0], pending.ctx, pending.userId); // 用任意机器人转发
-        }
-        ctx.answerCallbackQuery({ text: "Message approved", show_alert: true });
+        await forwardMessage(pendingMessages.get(pendingKeys[0]).ctx, pendingMessages.get(pendingKeys[0]).userId);
+        await ctx.answerCallbackQuery({ text: "Message approved and forwarded", show_alert: true });
       } else if (action === "reject") {
-        ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
+        await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
       }
 
-      // 更新按钮为已处理
-      for (const key of pendingKeys) {
+      // 编辑所有通知消息并删除 pending
+      await Promise.all(pendingKeys.map(async key => {
         const pending = pendingMessages.get(key);
         try {
-          await bots[0].api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
-            { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") });
+          await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId,
+            { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
+          );
         } catch {}
         pendingMessages.delete(key);
-      }
-    } catch (err) { console.log("Callback handling error:", err.message); }
+      }));
+    } catch (err) { console.log("Error handling callback:", err.message); }
   });
 });
 
@@ -228,7 +241,7 @@ bots.forEach(bot => {
 // 用户退群清理
 // ---------------------
 bots.forEach(bot => {
-  bot.on("chat_member", ctx => {
+  bot.on("chat_member", async ctx => {
     const status = ctx.chatMember.new_chat_member.status;
     const userId = ctx.chatMember.new_chat_member.user.id;
     if (status === "left" || status === "kicked") {
@@ -236,18 +249,9 @@ bots.forEach(bot => {
       if (nickname) usedNicknames.delete(nickname);
       userMap.delete(userId);
       userHistory.delete(userId);
+      adCountMap.delete(userId);
       notifiedUsers.delete(userId);
-    }
-  });
-});
-
-// ---------------------
-// 管理员私聊注册
-// ---------------------
-bots.forEach(bot => {
-  bot.on("message", ctx => {
-    if (ctx.chat.type === "private" && !ctx.from.is_bot) {
-      adminsSet.add(ctx.from.id);
+      console.log(`Removed anonymous ID for user ${userId}`);
     }
   });
 });
@@ -269,6 +273,7 @@ app.get("/", (req, res) => res.send("Bot running"));
 app.listen(port, async () => {
   console.log(`Listening on port ${port}`);
   if (!process.env.RENDER_EXTERNAL_URL) return;
+
   await Promise.all(bots.map(async bot => {
     const webhookUrl = `${process.env.RENDER_EXTERNAL_URL}/bot${bot.token}`;
     try {
