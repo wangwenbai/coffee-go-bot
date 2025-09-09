@@ -71,6 +71,12 @@ const adminIds = new Set();
 const processedMessages = new Set();
 
 // =====================
+// 待审批消息
+// =====================
+// key = 群消息 ID, value = { userNick, text, notifiedAdmins: Set<adminId> }
+const pendingApprovals = new Map();
+
+// =====================
 // 群消息处理
 // =====================
 async function handleGroupMessage(ctx) {
@@ -92,26 +98,32 @@ async function handleGroupMessage(ctx) {
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
-  const safeDelete = async () => {
-    try { await ctx.api.deleteMessage(chatId, messageId); } 
-    catch(e){ console.log("删除消息失败:", e.description || e); }
-  };
+  // 删除消息
+  try { await ctx.api.deleteMessage(chatId, messageId); }
+  catch(e){ console.log("删除消息失败:", e.description || e); }
 
+  // 判断是否违规需要审批
   if (hasLinkOrMention || hasBlockedWord) {
-    await safeDelete();
+    // 保存待审批消息
+    pendingApprovals.set(messageId, { userNick: nick, text, notifiedAdmins: new Set() });
+
+    // 通知所有管理员
     for (let adminId of adminIds) {
       try {
         const keyboard = new InlineKeyboard()
           .text("同意", `approve_${messageId}`)
           .text("拒绝", `reject_${messageId}`);
-        await ctx.api.sendMessage(adminId, `用户 ${nick} 发送了违规消息，等待审批：\n${text}`, { reply_markup: keyboard });
+        await ctx.api.sendMessage(adminId,
+          `用户 ${nick} 发送了可能违规消息，等待审批：\n${text}`,
+          { reply_markup: keyboard }
+        );
+        pendingApprovals.get(messageId).notifiedAdmins.add(adminId);
       } catch(e){ console.log("通知管理员失败:", e.description || e); }
     }
-    return;
+    return; // 不转发
   }
 
-  // 删除并匿名转发
-  await safeDelete();
+  // 正常匿名转发
   try {
     const forwardBot = getNextBot();
     await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${text}`);
@@ -125,9 +137,14 @@ async function handleCallback(ctx) {
   const data = ctx.callbackQuery.data;
   const match = data.match(/^(approve|reject)_(\d+)$/);
   if (!match) return;
-  const [_, action] = match;
+  const [_, action, messageIdStr] = match;
+  const messageId = Number(messageIdStr);
 
-  for (let adminId of adminIds) {
+  const pending = pendingApprovals.get(messageId);
+  if (!pending) return;
+
+  // 更新所有管理员的按钮为“已处理”
+  for (let adminId of pending.notifiedAdmins) {
     try {
       await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
         inline_keyboard: [[{ text: action === "approve" ? "已同意" : "已拒绝", callback_data: "done" }]]
@@ -135,16 +152,16 @@ async function handleCallback(ctx) {
     } catch {}
   }
 
+  // 审核同意 → 匿名转发
   if (action === "approve") {
-    const nick = nickMap.get(ctx.callbackQuery.from.id) || NICK_PREFIX;
-    const lines = ctx.callbackQuery.message.text?.split("\n") || [];
-    const originalText = lines[lines.length - 1] || "";
     try {
       const forwardBot = getNextBot();
-      await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${originalText}`);
+      await forwardBot.api.sendMessage(GROUP_ID, `${pending.userNick} ${pending.text}`);
     } catch(e){ console.log("审批转发失败:", e.description || e); }
   }
 
+  // 移除待审批记录
+  pendingApprovals.delete(messageId);
   await ctx.answerCallbackQuery();
 }
 
@@ -182,7 +199,7 @@ app.listen(PORT, async () => {
 
   for (const bot of bots) {
     try {
-      await bot.init();  // ✅ 初始化
+      await bot.init();  // 初始化
       await bot.api.setWebhook(WEBHOOK_URL);
       console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
     } catch(e) {
