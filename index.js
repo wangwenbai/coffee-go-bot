@@ -73,20 +73,28 @@ function getNextBot() {
 const adminIds = new Set();
 
 // =====================
-// 删除消息重试
+// 删除消息并转发辅助函数
 // =====================
-async function deleteMessageWithRetry(api, chatId, messageId, retries = 3, delayMs = 500) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      await api.deleteMessage(chatId, messageId);
-      return true;
-    } catch (e) {
-      if (i === retries - 1) {
-        console.error(`删除消息失败 (${messageId}):`, e.message);
-        return false;
+async function tryDeleteThenForward(ctx, msg, forwardFn, retries = 3, delayMs = 500) {
+  try {
+    await ctx.api.deleteMessage(msg.chat.id, msg.message_id);
+    // 删除成功，立即转发
+    await forwardFn();
+  } catch (e) {
+    console.warn(`首次删除失败 (${msg.message_id}): ${e.message}`);
+    // 异步重试
+    let attempt = 0;
+    const interval = setInterval(async () => {
+      attempt++;
+      try {
+        await ctx.api.deleteMessage(msg.chat.id, msg.message_id);
+        clearInterval(interval);
+        await forwardFn();
+      } catch (err) {
+        console.warn(`重试删除 ${attempt}/${retries} 失败 (${msg.message_id}): ${err.message}`);
+        if (attempt >= retries) clearInterval(interval);
       }
-      await new Promise(r => setTimeout(r, delayMs));
-    }
+    }, delayMs);
   }
 }
 
@@ -106,55 +114,52 @@ async function handleGroupMessage(bot, ctx) {
   }
   const nick = nickMap.get(userId);
 
-  // 检查违规
   const text = msg.text || "";
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
-  // 违规消息
   if (hasLinkOrMention || hasBlockedWord) {
-    const deleted = await deleteMessageWithRetry(ctx.api, ctx.chat.id, msg.message_id);
-    if (!deleted) return;
-
-    // 通知管理员
-    for (let adminId of adminIds) {
-      try {
-        const keyboard = new InlineKeyboard()
-          .text("同意", `approve_${msg.message_id}`)
-          .text("拒绝", `reject_${msg.message_id}`);
-        await ctx.api.sendMessage(adminId,
-          `用户 ${msg.from.username || msg.from.first_name} (${msg.from.id}) 发送违规消息，等待审批：\n${text}`,
-          { reply_markup: keyboard }
-        );
-      } catch (e) {}
-    }
+    // 违规消息，只删除，不直接转发
+    await tryDeleteThenForward(ctx, msg, async () => {
+      // 通知管理员
+      for (let adminId of adminIds) {
+        try {
+          const keyboard = new InlineKeyboard()
+            .text("同意", `approve_${msg.message_id}`)
+            .text("拒绝", `reject_${msg.message_id}`);
+          await ctx.api.sendMessage(adminId,
+            `用户 ${msg.from.username || msg.from.first_name} (${msg.from.id}) 发送了违规消息，等待审批：\n${text}`,
+            { reply_markup: keyboard }
+          );
+        } catch (e) {}
+      }
+    });
     return;
   }
 
-  // 正常删除并匿名转发
-  const deleted = await deleteMessageWithRetry(ctx.api, ctx.chat.id, msg.message_id);
-  if (!deleted) return;
-
-  const forwardBot = getNextBot();
-  try {
-    if (msg.photo) {
-      await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
-        caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
-      });
-    } else if (msg.video) {
-      await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, {
-        caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
-      });
-    } else if (msg.sticker) {
-      await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
-    } else if (msg.text) {
-      await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${msg.text}`);
-    } else {
-      await forwardBot.api.sendMessage(GROUP_ID, `${nick} [不支持的消息类型]`);
+  // 正常消息，删除后匿名转发
+  await tryDeleteThenForward(ctx, msg, async () => {
+    const forwardBot = getNextBot();
+    try {
+      if (msg.photo) {
+        await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
+          caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
+        });
+      } else if (msg.video) {
+        await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, {
+          caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
+        });
+      } else if (msg.sticker) {
+        await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
+      } else if (msg.text) {
+        await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${msg.text}`);
+      } else {
+        await forwardBot.api.sendMessage(GROUP_ID, `${nick} [不支持的消息类型]`);
+      }
+    } catch (e) {
+      console.error("转发失败:", e.message);
     }
-  } catch (e) {
-    console.error("转发失败:", e.message);
-  }
+  });
 }
 
 // =====================
@@ -177,7 +182,6 @@ async function handleCallback(bot, ctx) {
   }
 
   if (action === "approve") {
-    // 转发消息
     const msgText = ctx.callbackQuery.message.text.split("\n").pop();
     const nick = NICK_PREFIX;
     const forwardBot = getNextBot();
