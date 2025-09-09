@@ -66,15 +66,25 @@ function getNextBot() {
 const adminIds = new Set();
 
 // =====================
+// 已处理消息集合，防止重复处理
+// =====================
+const processedMessages = new Set();
+
+// =====================
 // 群消息处理
 // =====================
 async function handleGroupMessage(ctx) {
   const msg = ctx.message;
   const userId = msg.from.id;
-  const chatId = Number(ctx.chat.id);
-  const text = msg.text || "";
+  const messageId = msg.message_id;
+
+  if (processedMessages.has(messageId)) return; // 已处理过
+  processedMessages.add(messageId);
 
   if (adminIds.has(userId)) return; // 管理员消息不处理
+
+  const chatId = Number(ctx.chat.id);
+  const text = msg.text || "";
 
   if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
   const nick = nickMap.get(userId);
@@ -83,7 +93,7 @@ async function handleGroupMessage(ctx) {
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
   const safeDelete = async () => {
-    try { await ctx.api.deleteMessage(chatId, msg.message_id); } 
+    try { await ctx.api.deleteMessage(chatId, messageId); } 
     catch(e){ console.log("删除消息失败:", e.description || e); }
   };
 
@@ -92,8 +102,8 @@ async function handleGroupMessage(ctx) {
     for (let adminId of adminIds) {
       try {
         const keyboard = new InlineKeyboard()
-          .text("同意", `approve_${msg.message_id}`)
-          .text("拒绝", `reject_${msg.message_id}`);
+          .text("同意", `approve_${messageId}`)
+          .text("拒绝", `reject_${messageId}`);
         await ctx.api.sendMessage(adminId, `用户 ${nick} 发送了违规消息，等待审批：\n${text}`, { reply_markup: keyboard });
       } catch(e){ console.log("通知管理员失败:", e.description || e); }
     }
@@ -172,7 +182,7 @@ app.listen(PORT, async () => {
 
   for (const bot of bots) {
     try {
-      await bot.init();  // ✅ 关键：先初始化
+      await bot.init();  // ✅ 初始化
       await bot.api.setWebhook(WEBHOOK_URL);
       console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
     } catch(e) {
