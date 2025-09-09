@@ -75,26 +75,28 @@ const adminIds = new Set();
 // =====================
 // 删除消息并转发辅助函数
 // =====================
-async function tryDeleteThenForward(ctx, msg, forwardFn, retries = 3, delayMs = 500) {
-  try {
-    await ctx.api.deleteMessage(msg.chat.id, msg.message_id);
-    // 删除成功，立即转发
-    await forwardFn();
-  } catch (e) {
-    console.warn(`首次删除失败 (${msg.message_id}): ${e.message}`);
-    // 异步重试
-    let attempt = 0;
-    const interval = setInterval(async () => {
-      attempt++;
-      try {
-        await ctx.api.deleteMessage(msg.chat.id, msg.message_id);
-        clearInterval(interval);
-        await forwardFn();
-      } catch (err) {
-        console.warn(`重试删除 ${attempt}/${retries} 失败 (${msg.message_id}): ${err.message}`);
-        if (attempt >= retries) clearInterval(interval);
+async function deleteThenForward(ctx, msg, forwardFn, maxRetries = 3, delayMs = 500) {
+  let deleted = false;
+  let attempt = 0;
+
+  while (!deleted && attempt <= maxRetries) {
+    attempt++;
+    try {
+      await ctx.api.deleteMessage(msg.chat.id, msg.message_id);
+      deleted = true;
+    } catch (e) {
+      if (e.description && e.description.includes("Message to delete not found")) {
+        console.warn(`消息 ${msg.message_id} 未找到，跳过删除`);
+        break;
       }
-    }, delayMs);
+      console.warn(`删除消息失败 ${msg.message_id} 第${attempt}次: ${e.message}`);
+      if (attempt >= maxRetries) break;
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+
+  if (deleted) {
+    await forwardFn();
   }
 }
 
@@ -120,8 +122,8 @@ async function handleGroupMessage(bot, ctx) {
 
   if (hasLinkOrMention || hasBlockedWord) {
     // 违规消息，只删除，不直接转发
-    await tryDeleteThenForward(ctx, msg, async () => {
-      // 通知管理员
+    await deleteThenForward(ctx, msg, async () => {
+      // 通知管理员审批
       for (let adminId of adminIds) {
         try {
           const keyboard = new InlineKeyboard()
@@ -138,7 +140,7 @@ async function handleGroupMessage(bot, ctx) {
   }
 
   // 正常消息，删除后匿名转发
-  await tryDeleteThenForward(ctx, msg, async () => {
+  await deleteThenForward(ctx, msg, async () => {
     const forwardBot = getNextBot();
     try {
       if (msg.photo) {
