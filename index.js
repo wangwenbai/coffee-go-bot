@@ -51,7 +51,7 @@ function generateNick(userId) {
 function releaseNick(userId) {
   if (!nickMap.has(userId)) return;
   const nick = nickMap.get(userId);
-  const code = nick.slice(NICK_PREFIX.length + 1, -1); // 去掉【前缀和】
+  const code = nick.slice(NICK_PREFIX.length + 1, -1);
   usedCodes.delete(code);
   nickMap.delete(userId);
 }
@@ -86,7 +86,7 @@ setInterval(() => bots.forEach(loadGroupAdmins), 10 * 60 * 1000);
 // 消息处理
 // =====================
 const processedMessages = new Set();
-const pendingApprovals = new Map(); // message_id -> { userNick, text, notifiedAdmins }
+const pendingApprovals = new Map(); // message_id -> { userNick, text, fromUser, notifiedAdmins }
 
 async function handleGroupMessage(ctx) {
   const msg = ctx.message;
@@ -110,18 +110,29 @@ async function handleGroupMessage(ctx) {
 
   // 违规消息处理
   if (hasLinkOrMention || hasBlockedWord) {
-    pendingApprovals.set(messageId, { userNick: nick, text, notifiedAdmins: new Set() });
+    pendingApprovals.set(messageId, { userNick: nick, text, fromUser: msg.from, notifiedAdmins: new Set() });
     if (adminIds.size === 0) console.log("⚠️ 没有管理员可通知");
     else {
       for (let adminId of adminIds) {
         try {
+          const fromUser = msg.from;
+          const fullName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(" ");
+          const username = fromUser.username ? `@${fromUser.username}` : "无";
+          const userIdStr = fromUser.id;
+
+          const notifyText = `用户信息：
+昵称: ${fullName}
+用户名: ${username}
+用户ID: ${userIdStr}
+
+发送了可能违规的消息，等待审批：
+${text}`;
+
           const keyboard = new InlineKeyboard()
             .text("同意", `approve_${messageId}`)
             .text("拒绝", `reject_${messageId}`);
-          await ctx.api.sendMessage(adminId,
-            `用户 ${nick} 发送了可能违规消息，等待审批：\n${text}`,
-            { reply_markup: keyboard }
-          );
+
+          await ctx.api.sendMessage(adminId, notifyText, { reply_markup: keyboard });
           pendingApprovals.get(messageId).notifiedAdmins.add(adminId);
         } catch(e){ console.log(`通知管理员 ${adminId} 失败:`, e.description || e); }
       }
@@ -149,7 +160,7 @@ async function handleCallback(ctx) {
   const pending = pendingApprovals.get(messageId);
   if (!pending) return;
 
-  // 更新按钮为已处理
+  // 更新所有通知该消息的管理员
   for (let adminId of pending.notifiedAdmins) {
     try {
       await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
