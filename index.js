@@ -53,7 +53,7 @@ function releaseNick(userId) {
 }
 
 // =====================
-// 初始化机器人
+// 初始化机器人（多机器人轮转）
 // =====================
 const bots = BOT_TOKENS.map(token => new Bot(token));
 let botIndex = 0;
@@ -69,22 +69,25 @@ function getNextBot() {
 const adminIds = new Set();
 
 // =====================
-// 消息处理逻辑
+// 群消息处理
 // =====================
-async function handleGroupMessage(ctx) {
+async function handleGroupMessage(bot, ctx) {
   const msg = ctx.message;
   const userId = msg.from.id;
   const text = msg.text || "";
 
+  // 管理员消息不处理
+  if (adminIds.has(userId)) return;
+
+  // 生成匿名昵称
   if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
   const nick = nickMap.get(userId);
 
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
-  // 删除消息函数
   const safeDelete = async () => {
-    try { await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id); } catch {}
+    try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch {}
   };
 
   if (hasLinkOrMention || hasBlockedWord) {
@@ -94,8 +97,8 @@ async function handleGroupMessage(ctx) {
     for (let adminId of adminIds) {
       try {
         const keyboard = new InlineKeyboard()
-          .text("同意", `approve_${ctx.message.message_id}`)
-          .text("拒绝", `reject_${ctx.message.message_id}`);
+          .text("同意", `approve_${msg.message_id}`)
+          .text("拒绝", `reject_${msg.message_id}`);
         await ctx.api.sendMessage(adminId, `用户 ${nick} 发送了违规消息，等待审批：\n${text}`, {
           reply_markup: keyboard
         });
@@ -104,7 +107,7 @@ async function handleGroupMessage(ctx) {
     return;
   }
 
-  // 正常匿名转发
+  // 正常消息：删除并匿名转发
   await safeDelete();
   try {
     const forwardBot = getNextBot();
@@ -150,7 +153,7 @@ async function handleCallback(ctx) {
 bots.forEach(bot => {
   bot.on("message", async ctx => {
     try {
-      if (ctx.chat.id === GROUP_ID) await handleGroupMessage(ctx);
+      if (ctx.chat.id === GROUP_ID) await handleGroupMessage(bot, ctx);
       else if (ctx.chat.type === "private") adminIds.add(ctx.from.id);
     } catch {}
   });
