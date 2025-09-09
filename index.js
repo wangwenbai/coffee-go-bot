@@ -1,195 +1,161 @@
+// index.js
 import { Bot, InlineKeyboard } from "grammy";
-import fs from "fs";
 import express from "express";
-import Redis from "ioredis";
+import fs from "fs";
+import path from "path";
 
 const PORT = process.env.PORT || 3000;
 
-// --- 多机器人 Token 配置 ---
-const BOT_TOKENS = [
-  "TOKEN_1",
-  "TOKEN_2",
-  "TOKEN_3"
-];
+// 机器人令牌列表，多机器人轮询使用
+const BOT_TOKENS = (process.env.BOT_TOKENS || "").split(",").map(t => t.trim()).filter(Boolean);
+if (!BOT_TOKENS.length) {
+    console.error("请在环境变量 BOT_TOKENS 中设置至少一个机器人令牌");
+    process.exit(1);
+}
 
-let bots = [];
+// 多机器人轮询索引
 let botIndex = 0;
 
-// --- Redis 配置 ---
-const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
+// 屏蔽词集合
+let bannedWords = new Set();
 
-// --- 屏蔽词 ---
-let bannedWords = [];
-function loadBannedWords() {
-  if (fs.existsSync("blocked.txt")) {
-    bannedWords = fs.readFileSync("blocked.txt", "utf-8")
-      .split("\n")
-      .map(w => w.trim())
-      .filter(Boolean);
-    console.log("✅ 屏蔽词已加载：", bannedWords);
-  }
-}
-loadBannedWords();
-setInterval(loadBannedWords, 60_000);
-
-// --- 群管理信息 ---
-const groupData = new Map(); 
-// key: chatId, value: { admins: Map<adminId, true>, queue: [], processing: false, pendingMessages: Map<messageId, {...}> }
-
-// --- Express 保活 ---
-const app = express();
-app.use(express.json());
-app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
-
-// --- 初始化机器人 ---
-async function initBots() {
-  for (let i = 0; i < BOT_TOKENS.length; i++) {
-    const bot = new Bot(BOT_TOKENS[i]);
-    await bot.init();
-
-    bot.on("message", ctx => enqueueMessage(ctx, bot));
-    bot.on("callback_query:data", ctx => handleApproval(ctx));
-
-    bots.push(bot);
-    bot.start();
-    console.log(`🤖 Bot #${i + 1} 已启动`);
-  }
-}
-initBots();
-
-// --- 入队消息 ---
-function enqueueMessage(ctx, bot) {
-  if (!ctx.chat || ctx.from.is_bot) return;
-
-  if (!groupData.has(ctx.chat.id)) {
-    groupData.set(ctx.chat.id, { 
-      admins: new Map(), 
-      queue: [], 
-      processing: false, 
-      pendingMessages: new Map() 
-    });
-  }
-
-  const gData = groupData.get(ctx.chat.id);
-  gData.queue.push({ ctx, bot });
-
-  if (!gData.processing) processQueue(ctx.chat.id);
-}
-
-// --- 队列处理 ---
-async function processQueue(chatId) {
-  const gData = groupData.get(chatId);
-  gData.processing = true;
-
-  while (gData.queue.length > 0) {
-    const { ctx, bot } = gData.queue.shift();
-    await handleMessage(ctx, bot, gData);
-  }
-
-  gData.processing = false;
-}
-
-// --- 获取管理员 ---
-async function ensureAdmins(ctx, gData) {
-  try {
-    if (ctx.chat.type.endsWith("group")) {
-      const admins = await ctx.getChatAdministrators();
-      admins.forEach(a => gData.admins.set(a.user.id, true));
+// 定时刷新 blocked.txt
+const BLOCKED_FILE = path.resolve("./blocked.txt");
+function loadBlockedWords() {
+    if (fs.existsSync(BLOCKED_FILE)) {
+        const lines = fs.readFileSync(BLOCKED_FILE, "utf-8")
+            .split("\n")
+            .map(l => l.trim().toLowerCase())
+            .filter(Boolean);
+        bannedWords = new Set(lines);
+        console.log("✅ 屏蔽词已加载：", Array.from(bannedWords));
     }
-  } catch (e) {
-    console.log("⚠️ 获取管理员失败", e.message);
-  }
 }
+loadBlockedWords();
+setInterval(loadBlockedWords, 60 * 1000); // 每分钟刷新
 
-// --- 处理消息 ---
-async function handleMessage(ctx, bot, gData) {
-  await ensureAdmins(ctx, gData);
+// 管理员列表：自动识别群里管理员
+const adminSet = new Set();
 
-  const text = ctx.message?.text || "";
-  const containsLinkOrMention = /https?:\/\/\S+|@\w+/.test(text);
-  const containsBanned = bannedWords.some(w => text.toLowerCase().includes(w));
+// 违规消息记录
+const pendingViolations = new Map(); // key: message_id, value: { content, chat_id, processed: false, approvers: Set }
 
-  if (ctx.chat.type.endsWith("group")) {
-    try { await ctx.deleteMessage(); } catch {}
+// 创建多个机器人
+const bots = BOT_TOKENS.map(token => {
+    const bot = new Bot(token);
 
-    if (containsLinkOrMention || containsBanned) {
-      // 保存到 Redis
-      const key = `pending:${ctx.chat.id}:${ctx.message.message_id}`;
-      await redis.set(key, JSON.stringify({
-        chatId: ctx.chat.id,
-        content: text,
-        approved: false
-      }));
+    bot.on("message", async ctx => {
+        const message = ctx.message;
+        if (!message) return;
 
-      // 待审批
-      gData.pendingMessages.set(ctx.message.message_id, {
-        chatId: ctx.chat.id,
-        content: text,
-        approved: false
-      });
+        const chatId = message.chat.id;
+        const userId = message.from.id;
+        const text = message.text || "";
 
-      const keyboard = new InlineKeyboard()
-        .text("✅ 同意转发", `approve_${ctx.message.message_id}`)
-        .text("❌ 拒绝", `reject_${ctx.message.message_id}`);
-
-      for (let adminId of gData.admins.keys()) {
+        // 自动识别群管理员
         try {
-          await bot.api.sendMessage(adminId,
-            `用户 ${ctx.from.username || ctx.from.first_name} 发送消息:\n${text}\n审批操作：`,
-            { reply_markup: keyboard }
-          );
-        } catch (e) {
-          if (!e.description?.includes("Forbidden")) console.error(e);
+            const admins = await ctx.getChatAdministrators();
+            admins.forEach(a => adminSet.add(a.user.id));
+        } catch (err) {
+            // 可能不是群，忽略
         }
-      }
-    } else {
-      // 普通消息，轮流机器人处理
-      const forwardBot = bots[botIndex];
-      botIndex = (botIndex + 1) % bots.length;
-      try { await forwardBot.api.sendMessage(ctx.chat.id, text, { parse_mode: "HTML" }); } catch {}
-    }
-  }
-}
 
-// --- 审批处理 ---
-async function handleApproval(ctx) {
-  const data = ctx.callbackQuery.data;
-  const [action, messageId] = data.split("_");
-  const msgId = Number(messageId);
+        // 删除自己的消息不处理
+        if (message.from.is_bot) return;
 
-  // 找到群
-  let gData;
-  for (let gd of groupData.values()) {
-    if (gd.pendingMessages.has(msgId)) {
-      gData = gd;
-      break;
-    }
-  }
-  if (!gData) return;
+        // 检查违规
+        const hasLinkOrMention = /https?:\/\/|@/.test(text);
+        const hasBannedWord = [...bannedWords].some(word => text.toLowerCase().includes(word));
 
-  const msgInfo = gData.pendingMessages.get(msgId);
-  if (!msgInfo) return;
+        if (hasLinkOrMention || hasBannedWord) {
+            // 删除消息
+            try { await ctx.deleteMessage(message.message_id); } catch {}
 
-  if (action === "approve" && !msgInfo.approved) {
-    msgInfo.approved = true;
+            // 添加到待处理列表
+            pendingViolations.set(message.message_id, {
+                chat_id: chatId,
+                content: text,
+                processed: false,
+                approvers: new Set()
+            });
 
-    // 更新 Redis
-    const key = `pending:${msgInfo.chatId}:${msgId}`;
-    await redis.set(key, JSON.stringify(msgInfo));
+            // 通知所有管理员
+            adminSet.forEach(async adminId => {
+                try {
+                    await ctx.api.sendMessage(adminId,
+                        `用户 ${message.from.first_name} 发送了违规消息:\n${text}\n请审批是否匿名转发`,
+                        {
+                            reply_markup: new InlineKeyboard()
+                                .text("同意", `approve:${message.message_id}`)
+                                .text("拒绝", `reject:${message.message_id}`)
+                        });
+                } catch (err) {
+                    // 用户未私聊机器人，忽略
+                }
+            });
 
-    const forwardBot = bots[botIndex];
-    botIndex = (botIndex + 1) % bots.length;
-    try { await forwardBot.api.sendMessage(msgInfo.chatId, msgInfo.content, { parse_mode: "HTML" }); } catch {}
-  }
+        } else {
+            // 正常消息，轮询转发
+            const currentBot = bots[botIndex];
+            botIndex = (botIndex + 1) % bots.length;
 
-  // 更新所有管理员按钮为已处理
-  for (let adminId of gData.admins.keys()) {
-    try {
-      await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
-        reply_markup: new InlineKeyboard().text("已处理", "done")
-      });
-    } catch {}
-  }
+            try {
+                await currentBot.api.sendMessage(chatId, text);
+                try { await ctx.deleteMessage(message.message_id); } catch {}
+            } catch {}
+        }
+    });
 
-  await ctx.answerCallbackQuery();
-}
+    bot.on("callback_query:data", async ctx => {
+        const data = ctx.callbackQuery.data;
+        const fromId = ctx.from.id;
+
+        if (!data) return;
+        const [action, msgIdStr] = data.split(":");
+        const msgId = parseInt(msgIdStr);
+
+        const violation = pendingViolations.get(msgId);
+        if (!violation || violation.processed) {
+            await ctx.answerCallbackQuery({ text: "已处理" });
+            return;
+        }
+
+        if (!adminSet.has(fromId)) {
+            await ctx.answerCallbackQuery({ text: "你不是管理员" });
+            return;
+        }
+
+        if (action === "approve") {
+            // 标记已处理
+            violation.processed = true;
+
+            // 匿名转发
+            try {
+                await ctx.api.sendMessage(violation.chat_id,
+                    violation.content);
+            } catch {}
+
+            // 更新所有管理员按钮为“已处理”
+            adminSet.forEach(async adminId => {
+                try {
+                    await ctx.api.editMessageReplyMarkup(adminId, { inline_keyboard: [] });
+                } catch {}
+            });
+
+            await ctx.answerCallbackQuery({ text: "已同意" });
+        } else if (action === "reject") {
+            violation.processed = true;
+            await ctx.answerCallbackQuery({ text: "已拒绝" });
+        }
+    });
+
+    return bot;
+});
+
+// 启动所有机器人
+bots.forEach(bot => bot.start());
+
+// Express server 保活
+const app = express();
+app.get("/", (req, res) => res.send("Bot is running"));
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
