@@ -25,15 +25,19 @@ function loadBlockedWords() {
   }
 }
 loadBlockedWords();
-setInterval(loadBlockedWords, 60_000);
+// ⚠️ 不再每分钟更新，Render 自动部署更新即可
 
 // =====================
 // 匿名昵称生成
 // =====================
-const nickMap = new Map(); // userId -> nickname
+const nickMap = new Map(); // userId -> { nick, lastUsed }
 const usedCodes = new Set();
+
 function generateNick(userId) {
-  if (nickMap.has(userId)) return nickMap.get(userId);
+  if (nickMap.has(userId)) {
+    nickMap.get(userId).lastUsed = Date.now();
+    return nickMap.get(userId).nick;
+  }
 
   const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   while (true) {
@@ -43,20 +47,33 @@ function generateNick(userId) {
     if (!usedCodes.has(code)) {
       usedCodes.add(code);
       const nick = `【${NICK_PREFIX}${code}】`;
-      nickMap.set(userId, nick);
+      nickMap.set(userId, { nick, lastUsed: Date.now() });
       return nick;
     }
   }
 }
+
 function releaseNick(userId) {
   if (nickMap.has(userId)) {
-    const nick = nickMap.get(userId);
+    const { nick } = nickMap.get(userId);
     const code = nick.slice(NICK_PREFIX.length + 1, -1);
     usedCodes.delete(code);
     nickMap.delete(userId);
     console.log(`🔹 匿名码释放: ${nick} (${userId})`);
   }
 }
+
+// 定时清理超过10天未活跃的用户
+setInterval(() => {
+  const now = Date.now();
+  for (const [userId, { lastUsed, nick }] of nickMap) {
+    if (now - lastUsed > 10 * 24 * 60 * 60 * 1000) { // 10天
+      const code = nick.slice(NICK_PREFIX.length + 1, -1);
+      usedCodes.delete(code);
+      nickMap.delete(userId);
+    }
+  }
+}, 24 * 60 * 60 * 1000); // 每天清理一次
 
 // =====================
 // 初始化机器人
@@ -87,12 +104,32 @@ async function loadGroupAdmins(bot) {
 // =====================
 // 违规消息处理
 // =====================
-const pendingReviews = new Map(); // reviewId -> { user, msg, adminMsgIds }
+const pendingReviews = new Map(); // reviewId -> { user, msg, adminMsgIds, reviewTime }
+
+// 定时清理超过1天未处理的pendingReviews
+setInterval(() => {
+  const now = Date.now();
+  for (const [reviewId, review] of pendingReviews) {
+    if (now - review.reviewTime > 24 * 60 * 60 * 1000) { // 1天
+      pendingReviews.delete(reviewId);
+    }
+  }
+}, 60 * 60 * 1000); // 每小时清理一次
 
 // =====================
-// 已处理消息标记
+// 已处理消息标记 (只保留最近1000条)
 // =====================
 const processedMessages = new Set();
+const processedQueue = [];
+
+function markProcessed(msgKey) {
+  processedMessages.add(msgKey);
+  processedQueue.push(msgKey);
+  if (processedQueue.length > 1000) {
+    const oldKey = processedQueue.shift();
+    processedMessages.delete(oldKey);
+  }
+}
 
 // =====================
 // 消息处理
@@ -103,7 +140,7 @@ async function handleMessage(ctx) {
 
   const msgKey = `${msg.chat.id}_${msg.message_id}`;
   if (processedMessages.has(msgKey)) return;
-  processedMessages.add(msgKey);
+  markProcessed(msgKey);
 
   if (msg.from.is_bot) return;
 
@@ -125,7 +162,7 @@ async function handleMessage(ctx) {
     const reviewId = `${msg.chat.id}_${msg.message_id}`;
     const adminMsgIds = [];
 
-    pendingReviews.set(reviewId, { user: msg.from, msg, adminMsgIds });
+    pendingReviews.set(reviewId, { user: msg.from, msg, adminMsgIds, reviewTime: Date.now() });
 
     for (const adminId of adminIds) {
       try {
@@ -184,7 +221,6 @@ bots.forEach(bot => {
     const { user, msg, adminMsgIds } = review;
     pendingReviews.delete(reviewId);
 
-    // 更新所有管理员按钮 -> 已处理
     for (const adminId of adminIds) {
       for (const messageId of adminMsgIds) {
         try {
