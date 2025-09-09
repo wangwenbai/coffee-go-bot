@@ -87,10 +87,10 @@ async function loadGroupAdmins(bot) {
 // =====================
 // 违规消息处理
 // =====================
-const pendingReviews = new Map(); // reviewId -> { user, msg }
+const pendingReviews = new Map(); // reviewId -> { user, msg, adminMsgIds }
 
 // =====================
-// 已处理消息标记（防止重复转发）
+// 已处理消息标记
 // =====================
 const processedMessages = new Set();
 
@@ -102,10 +102,9 @@ async function handleMessage(ctx) {
   if (!msg || !msg.from) return;
 
   const msgKey = `${msg.chat.id}_${msg.message_id}`;
-  if (processedMessages.has(msgKey)) return; // 已处理过
+  if (processedMessages.has(msgKey)) return;
   processedMessages.add(msgKey);
 
-  // 🚫 忽略机器人消息
   if (msg.from.is_bot) return;
 
   const userId = msg.from.id;
@@ -120,24 +119,25 @@ async function handleMessage(ctx) {
     text.toLowerCase().includes(word.toLowerCase())
   );
 
-  // 违规消息：删除 + 通知管理员
   if (hasLinkOrMention || hasBlockedWord) {
     try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch (e) {}
 
     const reviewId = `${msg.chat.id}_${msg.message_id}`;
-    pendingReviews.set(reviewId, { user: msg.from, msg });
+    const adminMsgIds = [];
+
+    pendingReviews.set(reviewId, { user: msg.from, msg, adminMsgIds });
 
     for (const adminId of adminIds) {
       try {
         const kb = new InlineKeyboard()
           .text("✅ 同意", `approve_${reviewId}`)
           .text("❌ 拒绝", `reject_${reviewId}`);
-
-        await ctx.api.sendMessage(
+        const m = await ctx.api.sendMessage(
           adminId,
           `⚠️ 用户违规消息待审核\n\n👤 用户: ${msg.from.first_name} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${text}`,
           { reply_markup: kb }
         );
+        adminMsgIds.push(m.message_id);
       } catch (e) {}
     }
     return;
@@ -150,11 +150,11 @@ async function handleMessage(ctx) {
   try {
     if (msg.photo) {
       await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
-        caption: `${nick} ${msg.caption || ""}`
+        caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
       });
     } else if (msg.video) {
       await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, {
-        caption: `${nick} ${msg.caption || ""}`
+        caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
       });
     } else if (msg.sticker) {
       await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
@@ -181,18 +181,20 @@ bots.forEach(bot => {
     const review = pendingReviews.get(reviewId);
     if (!review) return ctx.answerCallbackQuery({ text: "该消息已处理或过期", show_alert: true });
 
-    const { user, msg } = review;
+    const { user, msg, adminMsgIds } = review;
     pendingReviews.delete(reviewId);
 
     // 更新所有管理员按钮 -> 已处理
     for (const adminId of adminIds) {
-      try {
-        await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
-          inline_keyboard: [
-            [{ text: action === "approve" ? "✅ 已同意" : "❌ 已拒绝", callback_data: "done" }]
-          ]
-        });
-      } catch (e) {}
+      for (const messageId of adminMsgIds) {
+        try {
+          await ctx.api.editMessageReplyMarkup(adminId, messageId, {
+            inline_keyboard: [
+              [{ text: action === "approve" ? "✅ 已同意" : "❌ 已拒绝", callback_data: "done" }]
+            ]
+          });
+        } catch (e) {}
+      }
     }
 
     if (action === "approve") {
@@ -201,11 +203,11 @@ bots.forEach(bot => {
       try {
         if (msg.photo) {
           await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, {
-            caption: `${nick} ${msg.caption || ""}`
+            caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
           });
         } else if (msg.video) {
           await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, {
-            caption: `${nick} ${msg.caption || ""}`
+            caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}`
           });
         } else if (msg.sticker) {
           await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
@@ -229,7 +231,7 @@ bots.forEach(bot => {
 });
 
 // =====================
-// 监听群成员变动，退群自动释放匿名码
+// 监听退群释放匿名码
 // =====================
 bots.forEach(bot => {
   bot.on("my_chat_member", async ctx => {
