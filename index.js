@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
 
 // =====================
-// 屏蔽词加载
+// 屏蔽词
 // =====================
 let blockedWords = [];
 function loadBlockedWords() {
@@ -21,14 +21,14 @@ function loadBlockedWords() {
       .split(/\r?\n/)
       .map(w => w.trim())
       .filter(Boolean);
-    console.log("✅ 屏蔽词已加载：", blockedWords);
+    console.log("✅ 屏蔽词已加载:", blockedWords);
   }
 }
 loadBlockedWords();
 setInterval(loadBlockedWords, 60_000);
 
 // =====================
-// 匿名昵称管理
+// 匿名昵称
 // =====================
 const nickMap = new Map();
 const usedCodes = new Set();
@@ -50,7 +50,7 @@ function releaseNick(userId) {
 }
 
 // =====================
-// 多机器人轮转
+// 多机器人
 // =====================
 const bots = BOT_TOKENS.map(token => new Bot(token));
 let botIndex = 0;
@@ -61,23 +61,27 @@ function getNextBot() {
 }
 
 // =====================
-// 管理员列表
+// 管理员识别
 // =====================
 const adminIds = new Set();
+async function loadGroupAdmins(bot) {
+  try {
+    const admins = await bot.api.getChatAdministrators(GROUP_ID);
+    admins.forEach(a => adminIds.add(a.user.id));
+    console.log("✅ 群管理员已加载:", Array.from(adminIds));
+  } catch(e) {
+    console.log("获取群管理员失败:", e.description || e.message);
+  }
+}
+// 定时刷新管理员（每10分钟）
+setInterval(() => bots.forEach(loadGroupAdmins), 10 * 60 * 1000);
 
 // =====================
-// 已处理消息集合
+// 消息处理
 // =====================
 const processedMessages = new Set();
-
-// =====================
-// 待审批消息
-// =====================
 const pendingApprovals = new Map(); // message_id -> { userNick, text, notifiedAdmins }
 
-// =====================
-// 群消息处理
-// =====================
 async function handleGroupMessage(ctx) {
   const msg = ctx.message;
   const userId = msg.from.id;
@@ -99,20 +103,24 @@ async function handleGroupMessage(ctx) {
   try { await ctx.api.deleteMessage(ctx.chat.id, messageId); }
   catch(e){ console.log("删除消息失败:", e.description || e); }
 
-  // 判断是否违规
+  // 违规消息处理
   if (hasLinkOrMention || hasBlockedWord) {
     pendingApprovals.set(messageId, { userNick: nick, text, notifiedAdmins: new Set() });
-    for (let adminId of adminIds) {
-      try {
-        const keyboard = new InlineKeyboard()
-          .text("同意", `approve_${messageId}`)
-          .text("拒绝", `reject_${messageId}`);
-        await ctx.api.sendMessage(adminId,
-          `用户 ${nick} 发送了可能违规消息，等待审批：\n${text}`,
-          { reply_markup: keyboard }
-        );
-        pendingApprovals.get(messageId).notifiedAdmins.add(adminId);
-      } catch(e){ console.log("通知管理员失败:", e.description || e); }
+    if (adminIds.size === 0) {
+      console.log("⚠️ 没有管理员可通知，请先加入群管理员");
+    } else {
+      for (let adminId of adminIds) {
+        try {
+          const keyboard = new InlineKeyboard()
+            .text("同意", `approve_${messageId}`)
+            .text("拒绝", `reject_${messageId}`);
+          await ctx.api.sendMessage(adminId,
+            `用户 ${nick} 发送了可能违规消息，等待审批：\n${text}`,
+            { reply_markup: keyboard }
+          );
+          pendingApprovals.get(messageId).notifiedAdmins.add(adminId);
+        } catch(e){ console.log(`通知管理员 ${adminId} 失败:`, e.description || e); }
+      }
     }
     return; // 不转发
   }
@@ -137,7 +145,7 @@ async function handleCallback(ctx) {
   const pending = pendingApprovals.get(messageId);
   if (!pending) return;
 
-  // 更新所有管理员按钮为“已处理”
+  // 更新按钮为已处理
   for (let adminId of pending.notifiedAdmins) {
     try {
       await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
@@ -146,7 +154,7 @@ async function handleCallback(ctx) {
     } catch {}
   }
 
-  // 审核同意 → 匿名转发
+  // 审批同意 -> 匿名转发
   if (action === "approve") {
     try {
       const forwardBot = getNextBot();
@@ -164,9 +172,6 @@ async function handleCallback(ctx) {
 bots.forEach(bot => {
   bot.on("message", handleGroupMessage);
   bot.on("callback_query", handleCallback);
-  bot.on("message", async ctx => {
-    if (ctx.chat.type === "private") adminIds.add(ctx.from.id);
-  });
 });
 
 // =====================
@@ -185,14 +190,14 @@ app.post("/webhook", async (req, res) => {
 });
 
 // =====================
-// 启动服务器 & 初始化机器人
+// 启动服务器 & 初始化
 // =====================
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-
   for (const bot of bots) {
     try {
       await bot.init();
+      await loadGroupAdmins(bot);
       await bot.api.setWebhook(WEBHOOK_URL);
       console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
     } catch(e) {
