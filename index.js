@@ -6,7 +6,7 @@ import fs from "fs";
 // 环境变量配置
 // =====================
 const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim());
-const GROUP_ID = Number(process.env.GROUP_ID);
+const GROUP_ID = Number(process.env.GROUP_ID); // 超级群负数，如 -1001234567890
 const NICK_PREFIX = process.env.NICK_PREFIX || "匿名";
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
@@ -30,7 +30,7 @@ setInterval(loadBlockedWords, 60_000);
 // =====================
 // 匿名昵称管理
 // =====================
-const nickMap = new Map(); // userId => nickname
+const nickMap = new Map();
 const usedCodes = new Set();
 
 function generateNick() {
@@ -74,9 +74,10 @@ const adminIds = new Set();
 async function handleGroupMessage(bot, ctx) {
   const msg = ctx.message;
   const userId = msg.from.id;
+  const chatId = Number(ctx.chat.id);
   const text = msg.text || "";
 
-  // 管理员消息不处理
+  // 管理员消息保持原样
   if (adminIds.has(userId)) return;
 
   // 生成匿名昵称
@@ -87,13 +88,13 @@ async function handleGroupMessage(bot, ctx) {
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
   const safeDelete = async () => {
-    try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch {}
+    try { await ctx.api.deleteMessage(chatId, msg.message_id); } 
+    catch(e){ console.log("删除消息失败:", e.description || e); }
   };
 
   if (hasLinkOrMention || hasBlockedWord) {
     await safeDelete();
 
-    // 通知管理员审批
     for (let adminId of adminIds) {
       try {
         const keyboard = new InlineKeyboard()
@@ -102,7 +103,7 @@ async function handleGroupMessage(bot, ctx) {
         await ctx.api.sendMessage(adminId, `用户 ${nick} 发送了违规消息，等待审批：\n${text}`, {
           reply_markup: keyboard
         });
-      } catch {}
+      } catch(e){ console.log("通知管理员失败:", e.description || e); }
     }
     return;
   }
@@ -112,7 +113,7 @@ async function handleGroupMessage(bot, ctx) {
   try {
     const forwardBot = getNextBot();
     await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${text}`);
-  } catch {}
+  } catch(e){ console.log("转发失败:", e.description || e); }
 }
 
 // =====================
@@ -125,7 +126,6 @@ async function handleCallback(ctx) {
 
   const [_, action, messageId] = match;
 
-  // 更新按钮状态
   for (let adminId of adminIds) {
     try {
       await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
@@ -141,7 +141,7 @@ async function handleCallback(ctx) {
     try {
       const forwardBot = getNextBot();
       await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${originalText}`);
-    } catch {}
+    } catch(e){ console.log("审批转发失败:", e.description || e); }
   }
 
   await ctx.answerCallbackQuery();
@@ -153,13 +153,13 @@ async function handleCallback(ctx) {
 bots.forEach(bot => {
   bot.on("message", async ctx => {
     try {
-      if (ctx.chat.id === GROUP_ID) await handleGroupMessage(bot, ctx);
+      if (Number(ctx.chat.id) === GROUP_ID) await handleGroupMessage(bot, ctx);
       else if (ctx.chat.type === "private") adminIds.add(ctx.from.id);
-    } catch {}
+    } catch(e){ console.log("处理消息失败:", e); }
   });
 
   bot.on("callback_query", async ctx => {
-    try { await handleCallback(ctx); } catch {}
+    try { await handleCallback(ctx); } catch(e){ console.log("处理回调失败:", e); }
   });
 });
 
@@ -173,7 +173,7 @@ app.post("/webhook", async (req, res) => {
   const updates = Array.isArray(req.body) ? req.body : [req.body];
   for (const update of updates) {
     for (const bot of bots) {
-      try { await bot.handleUpdate(update); } catch {}
+      try { await bot.handleUpdate(update); } catch(e){ console.log("处理update失败:", e); }
     }
   }
   res.sendStatus(200);
@@ -182,6 +182,6 @@ app.post("/webhook", async (req, res) => {
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
   for (const bot of bots) {
-    try { await bot.api.setWebhook(WEBHOOK_URL); } catch {}
+    try { await bot.api.setWebhook(WEBHOOK_URL); } catch(e){ console.log("设置Webhook失败:", e); }
   }
 });
