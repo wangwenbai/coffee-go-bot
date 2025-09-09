@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
 
 // =====================
-// 屏蔽词（可选）
+// 屏蔽词加载（可选）
 // =====================
 let blockedWords = [];
 function loadBlockedWords() {
@@ -74,7 +74,7 @@ async function handleGroupMessage(ctx) {
   const chatId = Number(ctx.chat.id);
   const text = msg.text || "";
 
-  if (adminIds.has(userId)) return;
+  if (adminIds.has(userId)) return; // 管理员消息不处理
 
   if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
   const nick = nickMap.get(userId);
@@ -165,17 +165,19 @@ app.post("/webhook", async (req, res) => {
 });
 
 // =====================
-// 启动服务器 & Webhook/轮询
+// 启动服务器 & 初始化机器人
 // =====================
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+
   for (const bot of bots) {
     try {
+      await bot.init();  // ✅ 关键：先初始化
       await bot.api.setWebhook(WEBHOOK_URL);
       console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
     } catch(e) {
-      console.log("设置Webhook失败，自动切换轮询模式:", e.description || e);
-      bot.start();
+      console.log("Webhook 设置失败，切换轮询模式:", e.message || e);
+      bot.start(); // 开启轮询模式
     }
   }
 });
