@@ -7,7 +7,7 @@ import fs from "fs";
 // =====================
 const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim());
 const GROUP_ID = Number(process.env.GROUP_ID);
-const NICK_PREFIX = process.env.NICK_PREFIX || "匿名";
+const NICK_PREFIX = process.env.NICK_PREFIX || "#"; // 默认 #
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
 
@@ -28,25 +28,32 @@ loadBlockedWords();
 setInterval(loadBlockedWords, 60_000);
 
 // =====================
-// 匿名昵称
+// 匿名昵称管理
 // =====================
-const nickMap = new Map();
-const usedCodes = new Set();
-function generateNick() {
+const nickMap = new Map();   // userId => nickname
+const usedCodes = new Set(); // 已用随机码
+
+function generateCode() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let code;
-  do { code = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join(""); }
-  while (usedCodes.has(code));
-  usedCodes.add(code);
-  return `【${NICK_PREFIX}${code}】`;
+  return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
+
+function generateNick(userId) {
+  if (nickMap.has(userId)) return nickMap.get(userId);
+  let code;
+  do { code = generateCode(); } while (usedCodes.has(code));
+  usedCodes.add(code);
+  const nick = `【${NICK_PREFIX}${code}】`;
+  nickMap.set(userId, nick);
+  return nick;
+}
+
 function releaseNick(userId) {
-  if (nickMap.has(userId)) {
-    const nick = nickMap.get(userId);
-    const code = nick.slice(NICK_PREFIX.length + 1, -1);
-    usedCodes.delete(code);
-    nickMap.delete(userId);
-  }
+  if (!nickMap.has(userId)) return;
+  const nick = nickMap.get(userId);
+  const code = nick.slice(NICK_PREFIX.length + 1, -1); // 去掉【前缀和】
+  usedCodes.delete(code);
+  nickMap.delete(userId);
 }
 
 // =====================
@@ -73,7 +80,6 @@ async function loadGroupAdmins(bot) {
     console.log("获取群管理员失败:", e.description || e.message);
   }
 }
-// 定时刷新管理员（每10分钟）
 setInterval(() => bots.forEach(loadGroupAdmins), 10 * 60 * 1000);
 
 // =====================
@@ -93,8 +99,7 @@ async function handleGroupMessage(ctx) {
   if (adminIds.has(userId)) return; // 管理员消息不处理
 
   const text = msg.text || "";
-  if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
-  const nick = nickMap.get(userId);
+  const nick = generateNick(userId);
 
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
@@ -106,9 +111,8 @@ async function handleGroupMessage(ctx) {
   // 违规消息处理
   if (hasLinkOrMention || hasBlockedWord) {
     pendingApprovals.set(messageId, { userNick: nick, text, notifiedAdmins: new Set() });
-    if (adminIds.size === 0) {
-      console.log("⚠️ 没有管理员可通知，请先加入群管理员");
-    } else {
+    if (adminIds.size === 0) console.log("⚠️ 没有管理员可通知");
+    else {
       for (let adminId of adminIds) {
         try {
           const keyboard = new InlineKeyboard()
@@ -172,6 +176,14 @@ async function handleCallback(ctx) {
 bots.forEach(bot => {
   bot.on("message", handleGroupMessage);
   bot.on("callback_query", handleCallback);
+
+  // 监听退群
+  bot.on("my_chat_member", async ctx => {
+    const member = ctx.myChatMember;
+    const userId = member.from.id;
+    const status = member.new_chat_member.status;
+    if (status === "left" || status === "kicked") releaseNick(userId);
+  });
 });
 
 // =====================
