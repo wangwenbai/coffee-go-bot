@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
 
 // =====================
-// 屏蔽词加载（可选）
+// 屏蔽词加载
 // =====================
 let blockedWords = [];
 function loadBlockedWords() {
@@ -66,15 +66,14 @@ function getNextBot() {
 const adminIds = new Set();
 
 // =====================
-// 已处理消息集合，防止重复处理
+// 已处理消息集合
 // =====================
 const processedMessages = new Set();
 
 // =====================
 // 待审批消息
 // =====================
-// key = 群消息 ID, value = { userNick, text, notifiedAdmins: Set<adminId> }
-const pendingApprovals = new Map();
+const pendingApprovals = new Map(); // message_id -> { userNick, text, notifiedAdmins }
 
 // =====================
 // 群消息处理
@@ -84,14 +83,12 @@ async function handleGroupMessage(ctx) {
   const userId = msg.from.id;
   const messageId = msg.message_id;
 
-  if (processedMessages.has(messageId)) return; // 已处理过
+  if (processedMessages.has(messageId)) return;
   processedMessages.add(messageId);
 
   if (adminIds.has(userId)) return; // 管理员消息不处理
 
-  const chatId = Number(ctx.chat.id);
   const text = msg.text || "";
-
   if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
   const nick = nickMap.get(userId);
 
@@ -99,15 +96,12 @@ async function handleGroupMessage(ctx) {
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
   // 删除消息
-  try { await ctx.api.deleteMessage(chatId, messageId); }
+  try { await ctx.api.deleteMessage(ctx.chat.id, messageId); }
   catch(e){ console.log("删除消息失败:", e.description || e); }
 
-  // 判断是否违规需要审批
+  // 判断是否违规
   if (hasLinkOrMention || hasBlockedWord) {
-    // 保存待审批消息
     pendingApprovals.set(messageId, { userNick: nick, text, notifiedAdmins: new Set() });
-
-    // 通知所有管理员
     for (let adminId of adminIds) {
       try {
         const keyboard = new InlineKeyboard()
@@ -131,7 +125,7 @@ async function handleGroupMessage(ctx) {
 }
 
 // =====================
-// 管理员审批回调
+// 审批回调
 // =====================
 async function handleCallback(ctx) {
   const data = ctx.callbackQuery.data;
@@ -143,7 +137,7 @@ async function handleCallback(ctx) {
   const pending = pendingApprovals.get(messageId);
   if (!pending) return;
 
-  // 更新所有管理员的按钮为“已处理”
+  // 更新所有管理员按钮为“已处理”
   for (let adminId of pending.notifiedAdmins) {
     try {
       await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
@@ -160,13 +154,12 @@ async function handleCallback(ctx) {
     } catch(e){ console.log("审批转发失败:", e.description || e); }
   }
 
-  // 移除待审批记录
   pendingApprovals.delete(messageId);
   await ctx.answerCallbackQuery();
 }
 
 // =====================
-// 绑定事件
+// 事件绑定
 // =====================
 bots.forEach(bot => {
   bot.on("message", handleGroupMessage);
@@ -199,12 +192,12 @@ app.listen(PORT, async () => {
 
   for (const bot of bots) {
     try {
-      await bot.init();  // 初始化
+      await bot.init();
       await bot.api.setWebhook(WEBHOOK_URL);
       console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
     } catch(e) {
       console.log("Webhook 设置失败，切换轮询模式:", e.message || e);
-      bot.start(); // 开启轮询模式
+      bot.start();
     }
   }
 });
