@@ -13,18 +13,18 @@ const GROUP_ID = process.env.GROUP_ID;
 const NICK_PREFIX = process.env.NICK_PREFIX || "User";
 
 // ---------------------
-// 全局存储
+// 全局存储 (JS 里不能写类型声明)
 // ---------------------
-const userMap = new Map<number, string>();
-const userHistory = new Map<string, string[]>();
-const messageMap = new Map<number, number>();
-const pendingMessages = new Map<string, { ctx: any, userId: string, notifMsgId: number | null, chatId: number, msgData: any }>();
-const usedNicknames = new Set<string>();
+const userMap = new Map();
+const userHistory = new Map();
+const messageMap = new Map();
+const pendingMessages = new Map();
+const usedNicknames = new Set();
 
 // ---------------------
 // 屏蔽词
 // ---------------------
-let blockedKeywords: string[] = [];
+let blockedKeywords = [];
 function loadBlockedKeywords() {
   try {
     const data = fs.readFileSync('./blocked.txt', 'utf8');
@@ -41,7 +41,7 @@ fs.watchFile('./blocked.txt', () => loadBlockedKeywords());
 // 工具函数
 // ---------------------
 function generateRandomNickname() {
-  let nickname: string;
+  let nickname;
   do {
     const letters = String.fromCharCode(65 + Math.floor(Math.random() * 26)) +
                     String.fromCharCode(65 + Math.floor(Math.random() * 26));
@@ -53,30 +53,30 @@ function generateRandomNickname() {
   return nickname;
 }
 
-function getUserId(userId: number) {
+function getUserId(userId) {
   if (!userMap.has(userId)) userMap.set(userId, generateRandomNickname());
-  return userMap.get(userId)!;
+  return userMap.get(userId);
 }
 
-function saveUserMessage(userId: string, msg: string) {
+function saveUserMessage(userId, msg) {
   if (!userHistory.has(userId)) userHistory.set(userId, []);
-  userHistory.get(userId)!.push(msg);
+  userHistory.get(userId).push(msg);
 }
 
-function containsBlockedKeyword(text?: string) {
+function containsBlockedKeyword(text) {
   if (!text) return false;
   const lowerText = text.toLowerCase();
   return blockedKeywords.some(word => lowerText.includes(word.toLowerCase()));
 }
 
-function containsLinkOrMention(text?: string) {
+function containsLinkOrMention(text) {
   if (!text) return false;
   const urlRegex = /(https?:\/\/[^\s]+|www\.[^\s]+)/i;
   const mentionRegex = /@[a-zA-Z0-9_]+/;
   return urlRegex.test(text) || mentionRegex.test(text);
 }
 
-function formatUserIdentity(user: any) {
+function formatUserIdentity(user) {
   if (user.username) return `@${user.username}`;
   const name = [user.first_name, user.last_name].filter(Boolean).join(" ");
   return `${name || "Unknown User"} (no username)`;
@@ -85,12 +85,9 @@ function formatUserIdentity(user: any) {
 // ---------------------
 // 安全发送消息
 // ---------------------
-async function safeSendMessage(bot: Bot, chatId: number, text: string, options?: any) {
-  try { await bot.api.sendMessage(chatId, text, options); } catch (err: any) {
-    if (err.response && err.response.error_code === 403) {
-      // 无法私聊管理员，忽略
-      return;
-    }
+async function safeSendMessage(bot, chatId, text, options) {
+  try { await bot.api.sendMessage(chatId, text, options); } catch (err) {
+    if (err.response && err.response.error_code === 403) return; // 管理员未私聊
     console.log("sendMessage failed:", err.message);
   }
 }
@@ -98,7 +95,7 @@ async function safeSendMessage(bot: Bot, chatId: number, text: string, options?:
 // ---------------------
 // 转发消息
 // ---------------------
-async function forwardMessage(ctx: any, userId: string, targetChatId = GROUP_ID, replyTargetId: number | null = null) {
+async function forwardMessage(ctx, userId, targetChatId = GROUP_ID, replyTargetId = null) {
   const msg = ctx.message;
   let sent;
   try {
@@ -116,9 +113,9 @@ async function forwardMessage(ctx: any, userId: string, targetChatId = GROUP_ID,
 }
 
 // ---------------------
-// 获取所有已私聊过的管理员
+// 获取所有管理员
 // ---------------------
-async function getAdmins(bot: Bot) {
+async function getAdmins(bot) {
   try {
     const admins = await bot.api.getChatAdministrators(GROUP_ID);
     return admins.filter(a => !a.user.is_bot).map(a => a.user.id);
@@ -134,7 +131,7 @@ async function getAdmins(bot: Bot) {
 const bots = BOT_TOKENS.map(token => new Bot(token));
 await Promise.all(bots.map(b => b.init()));
 
-let robotIndex = 0; // 轮询索引
+let robotIndex = 0;
 
 // ---------------------
 // 群消息处理
@@ -148,16 +145,14 @@ bots.forEach(bot => {
     const isAdmin = member.status === "administrator" || member.status === "creator";
     const userId = getUserId(ctx.from.id);
 
-    if (isAdmin) return; // 管理员消息不处理
+    if (isAdmin) return;
 
-    // 删除消息
     try { await ctx.deleteMessage(); } catch {}
 
     const textToCheck = msg.text || msg.caption;
     const isBlocked = containsBlockedKeyword(textToCheck) || containsLinkOrMention(textToCheck);
 
     if (isBlocked) {
-      // 违规 → 不转发，通知所有私聊过的管理员
       const admins = await getAdmins(bot);
       const keyboard = new InlineKeyboard()
         .text("✅ Approve", `approve:${msg.message_id}:${ctx.from.id}`)
@@ -169,7 +164,6 @@ bots.forEach(bot => {
       return;
     }
 
-    // 普通消息 → 轮询机器人匿名转发
     const botToUse = bots[robotIndex % bots.length];
     robotIndex++;
     await forwardMessage(ctx, userId);
@@ -177,7 +171,8 @@ bots.forEach(bot => {
 });
 
 // ---------------------
-// 回调查询（审批按钮）
+// 审批按钮
+// ---------------------
 bots.forEach(bot => {
   bot.on("callback_query:data", async ctx => {
     const userIdClicker = ctx.from.id;
@@ -191,16 +186,14 @@ bots.forEach(bot => {
     const origMsgId = parseInt(data[1]);
     const origUserId = parseInt(data[2]);
 
-    const pendingKeys = Array.from(pendingMessages.keys())
-      .filter(key => key.startsWith(`${origMsgId}:`));
+    const pendingKeys = Array.from(pendingMessages.keys()).filter(key => key.startsWith(`${origMsgId}:`));
     if (!pendingKeys.length) return ctx.answerCallbackQuery({ text: "This message has been processed", show_alert: true });
 
-    const firstPending = pendingMessages.get(pendingKeys[0])!;
-    const { ctx: originalCtx, userId, msgData } = firstPending;
+    const firstPending = pendingMessages.get(pendingKeys[0]);
+    const { ctx: originalCtx, userId } = firstPending;
 
     try {
       if (action === "approve") {
-        // 审批同意 → 匿名转发
         const botToUse = bots[robotIndex % bots.length];
         robotIndex++;
         await forwardMessage(originalCtx, userId);
@@ -209,9 +202,8 @@ bots.forEach(bot => {
         await ctx.answerCallbackQuery({ text: "Message rejected", show_alert: true });
       }
 
-      // 更新所有管理员按钮为已处理
       await Promise.all(pendingKeys.map(async key => {
-        const pending = pendingMessages.get(key)!;
+        const pending = pendingMessages.get(key);
         try {
           await bot.api.editMessageReplyMarkup(pending.chatId, pending.notifMsgId || undefined,
             { reply_markup: new InlineKeyboard().text("✅ Processed", "processed") }
