@@ -89,11 +89,23 @@ async function loadGroupAdmins(bot) {
 // =====================
 const pendingReviews = new Map(); // reviewId -> { user, msg }
 
+// =====================
+// 已处理消息标记（防止重复转发）
+// =====================
+const processedMessages = new Set();
+
+// =====================
+// 消息处理
+// =====================
 async function handleMessage(ctx) {
   const msg = ctx.message;
   if (!msg || !msg.from) return;
 
-  // 🚫 忽略机器人消息（防止死循环）
+  const msgKey = `${msg.chat.id}_${msg.message_id}`;
+  if (processedMessages.has(msgKey)) return; // 已处理过
+  processedMessages.add(msgKey);
+
+  // 🚫 忽略机器人消息
   if (msg.from.is_bot) return;
 
   const userId = msg.from.id;
@@ -131,7 +143,7 @@ async function handleMessage(ctx) {
     return;
   }
 
-  // 正常消息：删除 + 匿名转发（负载分配）
+  // 正常消息：删除 + 匿名转发
   try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch (e) {}
 
   const forwardBot = getNextBot();
@@ -213,15 +225,7 @@ bots.forEach(bot => {
 // 绑定消息事件
 // =====================
 bots.forEach(bot => {
-  bot.on("message", async ctx => {
-    try {
-      if (ctx.chat.id === GROUP_ID) {
-        await handleMessage(ctx);
-      }
-    } catch (e) {
-      console.error("处理消息失败:", e.message);
-    }
-  });
+  bot.on("message", handleMessage);
 });
 
 // =====================
@@ -236,7 +240,6 @@ bots.forEach(bot => {
     const newStatus = ctx.myChatMember?.new_chat_member?.status;
     const userId = ctx.myChatMember?.from?.id || ctx.myChatMember?.new_chat_member?.user?.id;
 
-    // 用户离开或被踢出
     if ((oldStatus !== 'left' && newStatus === 'left') || newStatus === 'kicked') {
       releaseNick(userId);
     }
