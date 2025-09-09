@@ -86,7 +86,7 @@ setInterval(() => bots.forEach(loadGroupAdmins), 10 * 60 * 1000);
 // 消息处理
 // =====================
 const processedMessages = new Set();
-const pendingApprovals = new Map(); // message_id -> { userNick, text, fromUser, notifiedAdmins }
+const pendingApprovals = new Map(); // message_id -> { userNick, text, fromUser, adminMessages, originalMsg }
 
 async function handleGroupMessage(ctx) {
   const msg = ctx.message;
@@ -98,9 +98,10 @@ async function handleGroupMessage(ctx) {
 
   if (adminIds.has(userId)) return; // 管理员消息不处理
 
-  const text = msg.text || "";
   const nick = generateNick(userId);
 
+  // 检查违规
+  const text = msg.text || "";
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
@@ -108,19 +109,25 @@ async function handleGroupMessage(ctx) {
   try { await ctx.api.deleteMessage(ctx.chat.id, messageId); }
   catch(e){ console.log("删除消息失败:", e.description || e); }
 
-  // 违规消息处理
   if (hasLinkOrMention || hasBlockedWord) {
-    pendingApprovals.set(messageId, { userNick: nick, text, fromUser: msg.from, notifiedAdmins: new Set() });
-    if (adminIds.size === 0) console.log("⚠️ 没有管理员可通知");
-    else {
-      for (let adminId of adminIds) {
-        try {
-          const fromUser = msg.from;
-          const fullName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(" ");
-          const username = fromUser.username ? `@${fromUser.username}` : "无";
-          const userIdStr = fromUser.id;
+    // 记录待审批
+    pendingApprovals.set(messageId, {
+      userNick: nick,
+      text,
+      fromUser: msg.from,
+      adminMessages: new Map(),
+      originalMsg: msg
+    });
 
-          const notifyText = `用户信息：
+    // 通知管理员
+    for (let adminId of adminIds) {
+      try {
+        const fromUser = msg.from;
+        const fullName = [fromUser.first_name, fromUser.last_name].filter(Boolean).join(" ");
+        const username = fromUser.username ? `@${fromUser.username}` : "无";
+        const userIdStr = fromUser.id;
+
+        const notifyText = `用户信息：
 昵称: ${fullName}
 用户名: ${username}
 用户ID: ${userIdStr}
@@ -128,22 +135,27 @@ async function handleGroupMessage(ctx) {
 发送了可能违规的消息，等待审批：
 ${text}`;
 
-          const keyboard = new InlineKeyboard()
-            .text("同意", `approve_${messageId}`)
-            .text("拒绝", `reject_${messageId}`);
+        const keyboard = new InlineKeyboard()
+          .text("同意", `approve_${messageId}`)
+          .text("拒绝", `reject_${messageId}`);
 
-          await ctx.api.sendMessage(adminId, notifyText, { reply_markup: keyboard });
-          pendingApprovals.get(messageId).notifiedAdmins.add(adminId);
-        } catch(e){ console.log(`通知管理员 ${adminId} 失败:`, e.description || e); }
-      }
+        const sentMsg = await ctx.api.sendMessage(adminId, notifyText, { reply_markup: keyboard });
+        pendingApprovals.get(messageId).adminMessages.set(adminId, sentMsg.message_id);
+      } catch(e){ console.log(`通知管理员 ${adminId} 失败:`, e.description || e); }
     }
     return; // 不转发
   }
 
-  // 正常匿名转发
+  // 正常转发所有类型消息
   try {
     const forwardBot = getNextBot();
-    await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${text}`);
+
+    if (msg.text) await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${msg.text}`);
+    if (msg.photo) await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length-1].file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+    if (msg.video) await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+    if (msg.animation) await forwardBot.api.sendAnimation(GROUP_ID, msg.animation.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+    if (msg.sticker) await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
+    if (msg.document) await forwardBot.api.sendDocument(GROUP_ID, msg.document.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
   } catch(e){ console.log("转发失败:", e.description || e); }
 }
 
@@ -160,10 +172,10 @@ async function handleCallback(ctx) {
   const pending = pendingApprovals.get(messageId);
   if (!pending) return;
 
-  // 更新所有通知该消息的管理员
-  for (let adminId of pending.notifiedAdmins) {
+  // 同步更新所有管理员消息按钮
+  for (let [adminId, adminMsgId] of pending.adminMessages) {
     try {
-      await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
+      await ctx.api.editMessageReplyMarkup(adminId, adminMsgId, {
         inline_keyboard: [[{ text: action === "approve" ? "已同意" : "已拒绝", callback_data: "done" }]]
       });
     } catch {}
@@ -173,7 +185,15 @@ async function handleCallback(ctx) {
   if (action === "approve") {
     try {
       const forwardBot = getNextBot();
-      await forwardBot.api.sendMessage(GROUP_ID, `${pending.userNick} ${pending.text}`);
+      const msg = pending.originalMsg;
+      const nick = pending.userNick;
+
+      if (msg.text) await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${msg.text}`);
+      if (msg.photo) await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length-1].file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+      if (msg.video) await forwardBot.api.sendVideo(GROUP_ID, msg.video.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+      if (msg.animation) await forwardBot.api.sendAnimation(GROUP_ID, msg.animation.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
+      if (msg.sticker) await forwardBot.api.sendSticker(GROUP_ID, msg.sticker.file_id);
+      if (msg.document) await forwardBot.api.sendDocument(GROUP_ID, msg.document.file_id, { caption: msg.caption ? `${nick} ${msg.caption}` : nick });
     } catch(e){ console.log("审批转发失败:", e.description || e); }
   }
 
@@ -188,7 +208,7 @@ bots.forEach(bot => {
   bot.on("message", handleGroupMessage);
   bot.on("callback_query", handleCallback);
 
-  // 监听退群
+  // 退群或被踢
   bot.on("my_chat_member", async ctx => {
     const member = ctx.myChatMember;
     const userId = member.from.id;
