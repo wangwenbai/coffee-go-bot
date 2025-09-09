@@ -108,7 +108,7 @@ async function handleGroupMessage(bot, ctx) {
     return;
   }
 
-  // 正常消息：删除并匿名转发
+  // 普通消息：删除并匿名转发
   await safeDelete();
   try {
     const forwardBot = getNextBot();
@@ -179,9 +179,20 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
+// =====================
+// 启动服务器 & 设置Webhook或轮询
+// =====================
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
+
   for (const bot of bots) {
-    try { await bot.api.setWebhook(WEBHOOK_URL); } catch(e){ console.log("设置Webhook失败:", e); }
+    try {
+      await bot.api.setWebhook(WEBHOOK_URL);
+      console.log(`Webhook 设置成功: ${WEBHOOK_URL}`);
+    } catch(e) {
+      console.log("设置Webhook失败:", e.description || e);
+      console.log("自动切换到轮询模式...");
+      bot.start();
+    }
   }
 });
