@@ -14,24 +14,26 @@ const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + "/webhook";
 // =====================
 // 屏蔽词
 // =====================
-let blockedWords = [];
+let blockedWordsRegex = null;
 function loadBlockedWords() {
   if (fs.existsSync("./blocked.txt")) {
-    blockedWords = fs.readFileSync("./blocked.txt", "utf-8")
+    const words = fs.readFileSync("./blocked.txt", "utf-8")
       .split(/\r?\n/)
       .map(w => w.trim())
       .filter(Boolean);
-    console.log("✅ 屏蔽词已加载:", blockedWords);
+    // 合并成单个正则，忽略大小写
+    blockedWordsRegex = new RegExp(words.join("|"), "i");
+    console.log("✅ 屏蔽词已加载:", words.length, "条");
   }
 }
 loadBlockedWords();
-// ⚠️ 不再每分钟更新，Render 自动部署更新即可
 
 // =====================
 // 匿名昵称生成
 // =====================
 const nickMap = new Map(); // userId -> { nick, lastUsed }
 const usedCodes = new Set();
+const NICK_MAX_COUNT = 10000;
 
 function generateNick(userId) {
   if (nickMap.has(userId)) {
@@ -63,17 +65,28 @@ function releaseNick(userId) {
   }
 }
 
-// 定时清理超过10天未活跃的用户
+// 定时清理超过10天未活跃的用户，同时限制最大条数 10,000
 setInterval(() => {
   const now = Date.now();
-  for (const [userId, { lastUsed, nick }] of nickMap) {
-    if (now - lastUsed > 10 * 24 * 60 * 60 * 1000) { // 10天
+  const entries = [...nickMap.entries()];
+  for (const [userId, { lastUsed, nick }] of entries) {
+    if (now - lastUsed > 10 * 24 * 60 * 60 * 1000) {
       const code = nick.slice(NICK_PREFIX.length + 1, -1);
       usedCodes.delete(code);
       nickMap.delete(userId);
     }
   }
-}, 24 * 60 * 60 * 1000); // 每天清理一次
+  // 超出最大条数时删除最久未使用的
+  if (nickMap.size > NICK_MAX_COUNT) {
+    const sorted = [...nickMap.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+    for (let i = 0; i < nickMap.size - NICK_MAX_COUNT; i++) {
+      const [userId, { nick }] = sorted[i];
+      const code = nick.slice(NICK_PREFIX.length + 1, -1);
+      usedCodes.delete(code);
+      nickMap.delete(userId);
+    }
+  }
+}, 24 * 60 * 60 * 1000);
 
 // =====================
 // 初始化机器人
@@ -100,21 +113,25 @@ async function loadGroupAdmins(bot) {
     console.error("❌ 获取管理员失败:", e.message);
   }
 }
+// 每小时更新一次管理员列表
+setInterval(() => {
+  bots.forEach(bot => loadGroupAdmins(bot));
+}, 60 * 60 * 1000);
 
 // =====================
 // 违规消息处理
 // =====================
 const pendingReviews = new Map(); // reviewId -> { user, msg, adminMsgIds, reviewTime }
 
-// 定时清理超过1天未处理的pendingReviews
+// 每小时清理超过1天未处理的pendingReviews
 setInterval(() => {
   const now = Date.now();
   for (const [reviewId, review] of pendingReviews) {
-    if (now - review.reviewTime > 24 * 60 * 60 * 1000) { // 1天
+    if (now - review.reviewTime > 24 * 60 * 60 * 1000) {
       pendingReviews.delete(reviewId);
     }
   }
-}, 60 * 60 * 1000); // 每小时清理一次
+}, 60 * 60 * 1000);
 
 // =====================
 // 已处理消息标记 (只保留最近1000条)
@@ -152,9 +169,7 @@ async function handleMessage(ctx) {
 
   const text = msg.text || msg.caption || "";
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
-  const hasBlockedWord = blockedWords.some(word =>
-    text.toLowerCase().includes(word.toLowerCase())
-  );
+  const hasBlockedWord = blockedWordsRegex && blockedWordsRegex.test(text);
 
   if (hasLinkOrMention || hasBlockedWord) {
     try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch (e) {}
@@ -164,6 +179,9 @@ async function handleMessage(ctx) {
 
     pendingReviews.set(reviewId, { user: msg.from, msg, adminMsgIds, reviewTime: Date.now() });
 
+    // 用户全名
+    const fullName = `${msg.from.first_name || ""} ${msg.from.last_name || ""}`.trim();
+
     for (const adminId of adminIds) {
       try {
         const kb = new InlineKeyboard()
@@ -171,7 +189,7 @@ async function handleMessage(ctx) {
           .text("❌ 拒绝", `reject_${reviewId}`);
         const m = await ctx.api.sendMessage(
           adminId,
-          `⚠️ 用户违规消息待审核\n\n👤 用户: ${msg.from.first_name} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${text}`,
+          `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${text}`,
           { reply_markup: kb }
         );
         adminMsgIds.push(m.message_id);
@@ -219,7 +237,7 @@ bots.forEach(bot => {
     if (!review) return ctx.answerCallbackQuery({ text: "该消息已处理或过期", show_alert: true });
 
     const { user, msg, adminMsgIds } = review;
-    pendingReviews.delete(reviewId);
+    pendingReviews.delete(reviewId); // 管理员操作后立即删除
 
     for (const adminId of adminIds) {
       for (const messageId of adminMsgIds) {
@@ -262,9 +280,7 @@ bots.forEach(bot => {
 // =====================
 // 绑定消息事件
 // =====================
-bots.forEach(bot => {
-  bot.on("message", handleMessage);
-});
+bots.forEach(bot => bot.on("message", handleMessage));
 
 // =====================
 // 监听退群释放匿名码
@@ -285,18 +301,20 @@ bots.forEach(bot => {
 });
 
 // =====================
-// Express Webhook
+// Express Webhook 按 token 分流
 // =====================
 const app = express();
 app.use(express.json());
 
 app.post("/webhook", async (req, res) => {
   const updates = Array.isArray(req.body) ? req.body : [req.body];
-  for (const update of updates) {
-    for (const bot of bots) {
+
+  await Promise.all(bots.map(async bot => {
+    for (const update of updates) {
       try { await bot.handleUpdate(update); } catch (e) { console.error(e.message); }
     }
-  }
+  }));
+
   res.sendStatus(200);
 });
 
