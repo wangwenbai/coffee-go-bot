@@ -1,7 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import express from "express";
 import fs from "fs";
-import crypto from "crypto";
 
 // =====================
 // 环境变量配置
@@ -10,7 +9,7 @@ const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim());
 const GROUP_ID = Number(process.env.GROUP_ID);
 const NICK_PREFIX = process.env.NICK_PREFIX || "匿名";
 const PORT = process.env.PORT || 3000;
-const WEBHOOK_URL = process.env.RENDER_EXTERNAL_URL + "/webhook";
+const WEBHOOK_URL = `${process.env.RENDER_EXTERNAL_URL}/webhook`;
 
 // =====================
 // 初始化屏蔽词
@@ -26,32 +25,28 @@ function loadBlockedWords() {
   }
 }
 loadBlockedWords();
-setInterval(loadBlockedWords, 60_000); // 每分钟刷新屏蔽词
+setInterval(loadBlockedWords, 60_000);
 
 // =====================
-// 初始化匿名用户映射
+// 匿名昵称管理
 // =====================
 const nickMap = new Map(); // userId => nickname
-const usedCodes = new Set(); // 保证匿名码唯一性
+const usedCodes = new Set();
 
 function generateNick() {
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const digits = "0123456789";
-  while (true) {
-    let arr = [...letters + digits];
-    arr.sort(() => Math.random() - 0.5);
-    let code = arr.slice(0,4).join("");
-    if (!usedCodes.has(code)) {
-      usedCodes.add(code);
-      return `【${NICK_PREFIX}${code}】`;
-    }
-  }
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let code;
+  do {
+    code = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+  } while (usedCodes.has(code));
+  usedCodes.add(code);
+  return `【${NICK_PREFIX}${code}】`;
 }
 
 function releaseNick(userId) {
   if (nickMap.has(userId)) {
     const nick = nickMap.get(userId);
-    const code = nick.slice(NICK_PREFIX.length+1, -1); // 去掉【前缀和】
+    const code = nick.slice(NICK_PREFIX.length + 1, -1);
     usedCodes.delete(code);
     nickMap.delete(userId);
   }
@@ -71,29 +66,29 @@ function getNextBot() {
 // =====================
 // 管理员列表
 // =====================
-const adminIds = new Set(); // 私聊过机器人并且是管理员的用户id
+const adminIds = new Set();
 
 // =====================
 // 消息处理逻辑
 // =====================
-async function handleGroupMessage(bot, ctx) {
+async function handleGroupMessage(ctx) {
   const msg = ctx.message;
   const userId = msg.from.id;
   const text = msg.text || "";
 
-  // 生成匿名昵称
-  if (!nickMap.has(userId)) {
-    nickMap.set(userId, generateNick());
-  }
+  if (!nickMap.has(userId)) nickMap.set(userId, generateNick());
   const nick = nickMap.get(userId);
 
-  // 检查违规条件
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
   const hasBlockedWord = blockedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
 
+  // 删除消息函数
+  const safeDelete = async () => {
+    try { await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id); } catch {}
+  };
+
   if (hasLinkOrMention || hasBlockedWord) {
-    // 删除原消息
-    try { await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id); } catch(e){}
+    await safeDelete();
 
     // 通知管理员审批
     for (let adminId of adminIds) {
@@ -101,52 +96,51 @@ async function handleGroupMessage(bot, ctx) {
         const keyboard = new InlineKeyboard()
           .text("同意", `approve_${ctx.message.message_id}`)
           .text("拒绝", `reject_${ctx.message.message_id}`);
-        await ctx.api.sendMessage(adminId,
-          `用户 ${nick} 发送了违规消息，等待审批：\n${text}`,
-          { reply_markup: keyboard }
-        );
-      } catch(e) {
-        // 忽略不能私聊的错误
-      }
+        await ctx.api.sendMessage(adminId, `用户 ${nick} 发送了违规消息，等待审批：\n${text}`, {
+          reply_markup: keyboard
+        });
+      } catch {}
     }
     return;
   }
 
-  // 正常删除并匿名转发
-  try { await ctx.api.deleteMessage(ctx.chat.id, ctx.message.message_id); } catch(e){}
-  const forwardBot = getNextBot();
+  // 正常匿名转发
+  await safeDelete();
   try {
+    const forwardBot = getNextBot();
     await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${text}`);
-  } catch(e){}
+  } catch {}
 }
 
 // =====================
 // 管理员审批回调
 // =====================
-async function handleCallback(bot, ctx) {
+async function handleCallback(ctx) {
   const data = ctx.callbackQuery.data;
   const match = data.match(/^(approve|reject)_(\d+)$/);
   if (!match) return;
-  const action = match[1];
-  const messageId = match[2];
 
-  // 更新所有管理员按钮
+  const [_, action, messageId] = match;
+
+  // 更新按钮状态
   for (let adminId of adminIds) {
     try {
-      await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, { inline_keyboard: [
-        [{ text: action === "approve" ? "已同意" : "已拒绝", callback_data: "done" }]
-      ]});
-    } catch(e){}
+      await ctx.api.editMessageReplyMarkup(adminId, ctx.callbackQuery.message.message_id, {
+        inline_keyboard: [[{ text: action === "approve" ? "已同意" : "已拒绝", callback_data: "done" }]]
+      });
+    } catch {}
   }
 
   if (action === "approve") {
-    // 转发消息
     const nick = nickMap.get(ctx.callbackQuery.from.id) || NICK_PREFIX;
+    const lines = ctx.callbackQuery.message.text?.split("\n") || [];
+    const originalText = lines[lines.length - 1] || "";
     try {
       const forwardBot = getNextBot();
-      await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${ctx.callbackQuery.message.text.split("\n").pop()}`);
-    } catch(e){}
+      await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${originalText}`);
+    } catch {}
   }
+
   await ctx.answerCallbackQuery();
 }
 
@@ -156,15 +150,13 @@ async function handleCallback(bot, ctx) {
 bots.forEach(bot => {
   bot.on("message", async ctx => {
     try {
-      if (ctx.chat.id === GROUP_ID) {
-        await handleGroupMessage(bot, ctx);
-      } else if (ctx.chat.type === "private") {
-        adminIds.add(ctx.from.id);
-      }
-    } catch(e){}
+      if (ctx.chat.id === GROUP_ID) await handleGroupMessage(ctx);
+      else if (ctx.chat.type === "private") adminIds.add(ctx.from.id);
+    } catch {}
   });
+
   bot.on("callback_query", async ctx => {
-    try { await handleCallback(bot, ctx); } catch(e){}
+    try { await handleCallback(ctx); } catch {}
   });
 });
 
@@ -175,21 +167,18 @@ const app = express();
 app.use(express.json());
 
 app.post("/webhook", async (req, res) => {
-  try {
-    const updates = Array.isArray(req.body) ? req.body : [req.body];
-    for (const update of updates) {
-      for (const bot of bots) {
-        try { await bot.handleUpdate(update); } catch(e){}
-      }
+  const updates = Array.isArray(req.body) ? req.body : [req.body];
+  for (const update of updates) {
+    for (const bot of bots) {
+      try { await bot.handleUpdate(update); } catch {}
     }
-  } catch(e){}
+  }
   res.sendStatus(200);
 });
 
 app.listen(PORT, async () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  // 设置 webhook
   for (const bot of bots) {
-    try { await bot.api.setWebhook(`${WEBHOOK_URL}`); } catch(e){}
+    try { await bot.api.setWebhook(WEBHOOK_URL); } catch {}
   }
 });
