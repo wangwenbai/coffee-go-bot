@@ -1,148 +1,169 @@
+import { Bot, InlineKeyboard } from "grammy";
 import express from "express";
 import fs from "fs";
 import path from "path";
-import { Bot, InlineKeyboard } from "grammy";
 
-// ---- 环境变量 ----
 const BOT_TOKENS = process.env.BOT_TOKENS.split(",").map(t => t.trim());
-const GROUP_ID = process.env.GROUP_ID;
+const GROUP_ID = Number(process.env.GROUP_ID);
 const NICK_PREFIX = process.env.NICK_PREFIX || "匿名";
 const PORT = process.env.PORT || 3000;
 const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
 
-// ---- 全局状态 ----
-const bots = [];
-const userMap = new Map(); // chat_id -> nick
-const nickSet = new Set(); // 用于唯一匿名码
-const adminSet = new Set(); // 已私聊管理员
-let bannedWords = [];
+const app = express();
+app.use(express.json());
 
-// ---- 屏蔽词加载 ----
-const BLOCKED_FILE = path.join(process.cwd(), "blocked.txt");
-function loadBannedWords() {
-  if (fs.existsSync(BLOCKED_FILE)) {
-    bannedWords = fs.readFileSync(BLOCKED_FILE, "utf-8")
+// 匿名码管理
+const userMap = new Map(); // userId => nickname
+const nicknameSet = new Set();
+
+// 屏蔽词管理
+let bannedWords = [];
+const blockedFile = path.resolve("./blocked.txt");
+function loadBlocked() {
+  if (fs.existsSync(blockedFile)) {
+    bannedWords = fs.readFileSync(blockedFile, "utf-8")
       .split("\n")
-      .map(s => s.trim())
+      .map(w => w.trim())
       .filter(Boolean);
     console.log("✅ 屏蔽词已加载：", bannedWords);
   }
 }
-loadBannedWords();
-setInterval(loadBannedWords, 60 * 1000); // 每分钟刷新
+loadBlocked();
+setInterval(loadBlocked, 60 * 1000); // 每分钟刷新
 
-// ---- 匿名码生成 ----
-function generateNick() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const digits = "0123456789";
+// 初始化所有机器人
+const bots = [];
+await Promise.all(BOT_TOKENS.map(async token => {
+  const bot = new Bot(token, { polling: false });
+  await bot.init(); // Webhook 必须初始化
+  bots.push(bot);
+}));
+
+// 多机器人轮流索引
+let botIndex = 0;
+function getNextBot() {
+  const bot = bots[botIndex];
+  botIndex = (botIndex + 1) % bots.length;
+  return bot;
+}
+
+// 生成匿名昵称
+function generateNickname(userId) {
+  if (userMap.has(userId)) return userMap.get(userId);
   while (true) {
-    const arr = [
-      chars[Math.floor(Math.random() * 26)],
-      chars[Math.floor(Math.random() * 26)],
-      digits[Math.floor(Math.random() * 10)],
-      digits[Math.floor(Math.random() * 10)],
-    ];
-    arr.sort(() => Math.random() - 0.5);
-    const nick = `${NICK_PREFIX}${arr.join("")}`;
-    if (!nickSet.has(nick)) {
-      nickSet.add(nick);
+    const letters = [...Array(2)].map(() => String.fromCharCode(65 + Math.floor(Math.random() * 26))).join("");
+    const digits = Math.floor(Math.random() * 100).toString().padStart(2, "0");
+    const arr = [letters, digits].sort(() => Math.random() - 0.5).join("");
+    const nick = `【${NICK_PREFIX}${arr}】`;
+    if (!nicknameSet.has(nick)) {
+      userMap.set(userId, nick);
+      nicknameSet.add(nick);
       return nick;
     }
   }
 }
 
-// ---- 初始化 Bot ----
-BOT_TOKENS.forEach(token => {
-  const bot = new Bot(token, { polling: false });
-  bots.push(bot);
+// 检查是否违规
+function isViolation(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
+  const hasBannedWord = bannedWords.some(w => lower.includes(w.toLowerCase()));
+  return hasLinkOrMention || hasBannedWord;
+}
 
+// 管理员私聊列表
+const adminSet = new Set(); // userId
+
+// 保存待审批消息
+const pendingMap = new Map(); // messageId => { userId, text, processed: false }
+
+// 处理群消息
+bots.forEach(bot => {
   bot.on("message", async ctx => {
-    const msg = ctx.message;
-    if (!msg || msg.chat.id.toString() !== GROUP_ID) return;
+    if (!ctx.chat || ctx.chat.id !== GROUP_ID) return;
 
-    const chatId = msg.from.id;
+    const text = ctx.message.text || "";
+    const userId = ctx.message.from.id;
+    const nick = generateNickname(userId);
 
-    // 分配匿名码
-    if (!userMap.has(chatId)) {
-      const nick = generateNick();
-      userMap.set(chatId, nick);
-    }
-    const nick = userMap.get(chatId);
-
-    // 消息内容
-    const text = msg.text || "";
-    const hasLinkOrMention = text.includes("http") || text.includes("@");
-    const hasBannedWord = bannedWords.some(word => text.toLowerCase().includes(word.toLowerCase()));
-
-    if (hasLinkOrMention || hasBannedWord) {
-      // 删除消息
+    if (isViolation(text)) {
+      // 删除违规消息
       try { await ctx.deleteMessage(); } catch {}
-      
-      // 通知管理员
+      // 保存待审批
+      pendingMap.set(ctx.message.message_id, { userId, text, processed: false });
+
+      // 通知所有已私聊过机器人管理员
       for (const adminId of adminSet) {
         try {
-          await ctx.api.sendMessage(adminId,
-            `${nick} 发送了一条可能违规的消息：\n${text}\n批准或拒绝？`,
-            { reply_markup: new InlineKeyboard()
-                .text("✅ 批准", `approve_${msg.message_id}`)
-                .text("❌ 拒绝", `reject_${msg.message_id}`) }
-          );
-        } catch {}
+          await bot.api.sendMessage(adminId,
+            `${nick} 发送了违规消息，请审批：\n内容: ${text}`,
+            {
+              reply_markup: new InlineKeyboard()
+                .text("同意转发", `approve_${ctx.message.message_id}`)
+                .text("拒绝转发", `reject_${ctx.message.message_id}`)
+            });
+        } catch (err) {
+          // 忽略未私聊错误
+        }
       }
+    } else {
+      // 正常转发匿名消息
+      const forwardBot = getNextBot();
+      try {
+        await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${text}`);
+      } catch {}
+    }
+  });
+
+  // 处理管理员审批按钮
+  bot.on("callback_query:data", async ctx => {
+    const data = ctx.callbackQuery.data;
+    if (!data) return;
+
+    const [action, msgIdStr] = data.split("_");
+    const msgId = Number(msgIdStr);
+    if (!pendingMap.has(msgId)) {
+      await ctx.answerCallbackQuery({ text: "消息已处理" });
+      return;
+    }
+    const pending = pendingMap.get(msgId);
+    if (pending.processed) {
+      await ctx.answerCallbackQuery({ text: "消息已处理" });
       return;
     }
 
-    // 正常消息匿名转发
-    const index = Math.floor(Math.random() * bots.length);
-    const forwardBot = bots[index];
-    const caption = `【${nick}】 ${text}`;
-    try { await forwardBot.api.sendMessage(GROUP_ID, caption); } catch {}
-  });
-
-  // 处理管理员按钮
-  bot.on("callback_query:data", async ctx => {
-    const data = ctx.callbackQuery.data;
-    const [action, msgId] = data.split("_");
-    const originalMsg = await ctx.api.getChatMessage(GROUP_ID, parseInt(msgId));
-    const chatId = originalMsg.from.id;
-    const nick = userMap.get(chatId);
-
     if (action === "approve") {
-      const index = Math.floor(Math.random() * bots.length);
-      const forwardBot = bots[index];
-      const caption = `【${nick}】 ${originalMsg.text}`;
-      try { await forwardBot.api.sendMessage(GROUP_ID, caption); } catch {}
-      await ctx.editMessageText("已批准 ✅");
+      pending.processed = true;
+      // 匿名转发
+      const nick = userMap.get(pending.userId) || generateNickname(pending.userId);
+      const forwardBot = getNextBot();
+      try { await forwardBot.api.sendMessage(GROUP_ID, `${nick} ${pending.text}`); } catch {}
+      await ctx.editMessageReplyMarkup(new InlineKeyboard().text("已处理", "done"));
+      pendingMap.delete(msgId);
+      await ctx.answerCallbackQuery({ text: "已同意并转发" });
     } else if (action === "reject") {
-      await ctx.editMessageText("已拒绝 ❌");
+      pending.processed = true;
+      await ctx.editMessageReplyMarkup(new InlineKeyboard().text("已处理", "done"));
+      pendingMap.delete(msgId);
+      await ctx.answerCallbackQuery({ text: "已拒绝" });
     }
   });
 });
 
-// ---- Webhook 配置 ----
-const app = express();
-app.use(express.json());
+// Webhook 路由
 bots.forEach(bot => {
-  app.post(`/bot${bot.token}`, (req, res) => {
-    bot.handleUpdate(req.body).then(() => res.sendStatus(200));
-  });
-});
-
-// ---- 管理员识别 ----
-app.post("/register_admin", async (req, res) => {
-  const { user_id } = req.body;
-  adminSet.add(user_id);
-  res.send({ ok: true });
-});
-
-app.listen(PORT, async () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  // 设置 webhook
-  bots.forEach(async bot => {
+  app.post(`/bot${bot.token}`, async (req, res) => {
     try {
-      await bot.api.setWebhook(`${RENDER_EXTERNAL_URL}/bot${bot.token}`);
+      await bot.handleUpdate(req.body);
+      res.sendStatus(200);
     } catch (err) {
-      console.error("Webhook 设置失败", err);
+      console.error(err);
+      res.sendStatus(500);
     }
   });
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
