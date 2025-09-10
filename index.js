@@ -17,20 +17,39 @@ if (!BOT_TOKENS.length || !GROUP_ID || !process.env.RENDER_EXTERNAL_URL) {
 }
 
 // =====================
-// 屏蔽词
+// 屏蔽词热更新（仅在内容变化时）
 // =====================
 let blockedWordsRegex = null;
+let lastBlockedContent = "";
+
 function loadBlockedWords() {
-  if (fs.existsSync("./blocked.txt")) {
-    const words = fs.readFileSync("./blocked.txt", "utf-8")
-      .split(/\r?\n/)
-      .map(w => w.trim())
-      .filter(Boolean);
-    blockedWordsRegex = new RegExp(words.join("|"), "i");
-    console.log("✅ 屏蔽词已加载:", words.length, "条");
+  if (!fs.existsSync("./blocked.txt")) {
+    if (blockedWordsRegex !== null) {
+      blockedWordsRegex = null;
+      lastBlockedContent = "";
+      console.log("⚠️ blocked.txt 不存在，屏蔽词清空");
+    }
+    return;
   }
+
+  const content = fs.readFileSync("./blocked.txt", "utf-8").trim();
+  if (content === lastBlockedContent) return; // 内容未变，不更新
+
+  const words = content
+    .split(/\r?\n/)
+    .map(w => w.trim())
+    .filter(Boolean);
+
+  blockedWordsRegex = words.length ? new RegExp(words.join("|"), "i") : null;
+  lastBlockedContent = content;
+  console.log("✅ 屏蔽词已更新:", words.length, "条");
 }
+
+// 启动时加载一次
 loadBlockedWords();
+
+// 定时轮询更新，每 5 分钟
+setInterval(loadBlockedWords, 5 * 60 * 1000);
 
 // =====================
 // 匿名昵称生成
@@ -181,7 +200,7 @@ async function handleMessage(ctx) {
           adminId,
           `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${text}`,
           { reply_markup: kb }
-        ).catch(() => {}); // 出错直接跳过
+        ).catch(() => {});
         if (m && m.message_id) adminMsgIds.push(m.message_id);
       } catch {}
     }
