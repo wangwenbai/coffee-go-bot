@@ -2,8 +2,8 @@ async function handleMessage(ctx) {
   const msg = ctx.message;
   if (!msg || !msg.from) return;
 
-  // ✅ 新增：只处理群聊消息，私聊忽略
-  if (msg.chat.type !== "group" && msg.chat.type !== "supergroup") return;
+  // ✅ 只处理群聊消息，私聊忽略
+  if (!msg.chat || (msg.chat.type !== "group" && msg.chat.type !== "supergroup")) return;
 
   const msgKey = `${msg.chat.id}_${msg.message_id}`;
   if (processedMessages.has(msgKey)) return;
