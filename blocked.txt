@@ -22,7 +22,6 @@ freereward
 earnpoints
 tokenairdrop
 tokenbonusclaim
-cryptoreward
 claimbonus
 referralbonus
 affiliate
