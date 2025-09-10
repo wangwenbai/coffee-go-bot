@@ -40,7 +40,7 @@ const nickMap = new Map();
 const usedCodes = new Set();
 const NICK_MAX_COUNT = 10000;
 
-function generateNick(userId, userInfo) {
+function generateNick(userId) {
   if (nickMap.has(userId)) {
     nickMap.get(userId).lastUsed = Date.now();
     return nickMap.get(userId).nick;
@@ -54,7 +54,7 @@ function generateNick(userId, userInfo) {
     if (!usedCodes.has(code)) {
       usedCodes.add(code);
       const nick = `【${NICK_PREFIX}${code}】`;
-      nickMap.set(userId, { nick, code, user: userInfo, lastUsed: Date.now() });
+      nickMap.set(userId, { nick, lastUsed: Date.now(), user: {} });
       return nick;
     }
   }
@@ -62,7 +62,8 @@ function generateNick(userId, userInfo) {
 
 function releaseNick(userId) {
   if (nickMap.has(userId)) {
-    const { code } = nickMap.get(userId);
+    const { nick } = nickMap.get(userId);
+    const code = nick.slice(NICK_PREFIX.length + 1, -1);
     usedCodes.delete(code);
     nickMap.delete(userId);
   }
@@ -142,7 +143,14 @@ async function handleMessage(ctx) {
   const msg = ctx.message;
   if (!msg || !msg.from) return;
 
-  // 只处理群聊
+  // 保存用户信息到 nickMap
+  const userId = msg.from.id;
+  if (!nickMap.has(userId)) {
+    const nick = generateNick(userId);
+    nickMap.get(userId).user = msg.from;
+  }
+
+  // 只处理群聊消息
   if (!msg.chat || (msg.chat.type !== "group" && msg.chat.type !== "supergroup")) return;
 
   const msgKey = `${msg.chat.id}_${msg.message_id}`;
@@ -151,9 +159,7 @@ async function handleMessage(ctx) {
 
   if (msg.from.is_bot) return;
 
-  const userId = msg.from.id;
-  const userInfo = msg.from;
-  const nick = generateNick(userId, userInfo);
+  const nick = generateNick(userId);
 
   if (adminIds.has(userId)) return;
 
@@ -226,7 +232,7 @@ bots.forEach(bot => {
     }
 
     if (action === "approve") {
-      const nick = generateNick(user.id, user);
+      const nick = generateNick(user.id);
       const forwardBot = getNextBot();
       try {
         if (msg.photo) await forwardBot.api.sendPhoto(GROUP_ID, msg.photo[msg.photo.length - 1].file_id, { caption: `${nick}${msg.caption ? ' ' + msg.caption : ''}` });
@@ -241,40 +247,36 @@ bots.forEach(bot => {
 });
 
 // =====================
-// 管理员查询匿名码信息
+// 管理员查询匿名码
 // =====================
 bots.forEach(bot => {
   bot.command("info_code", async ctx => {
-    if (!adminIds.has(ctx.from.id)) {
-      return ctx.reply("❌ 你不是管理员，无法使用此命令");
-    }
-    const parts = ctx.message.text.split(" ");
-    if (parts.length < 2) {
-      return ctx.reply("用法: /info_code <匿名码>");
-    }
-    const code = parts[1].replace(/[【】]/g, "").replace(NICK_PREFIX, "");
-    let found = null;
-    for (const [userId, data] of nickMap.entries()) {
-      if (data.code === code) {
-        found = { userId, data };
+    const fromId = ctx.from?.id;
+    if (!fromId) return;
+
+    // 不是管理员就直接 return，不发送任何消息
+    if (!adminIds.has(fromId)) return;
+
+    const args = ctx.message.text.trim().split(/\s+/);
+    if (args.length < 2) return ctx.reply("请输入匿名码，例如：/info_code #AB12");
+
+    const code = args[1].replace(/【|】/g, "");
+    let foundUser = null;
+
+    for (const [userId, { nick, user }] of nickMap.entries()) {
+      if (nick.includes(code)) {
+        foundUser = { userId, nick, user };
         break;
       }
     }
-    if (!found) {
-      return ctx.reply(`❌ 未找到匿名码 ${code} 对应的用户`);
-    }
-    const { userId, data } = found;
-    const user = data.user;
-    const fullName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
-    const username = user.username ? `@${user.username}` : "无用户名";
 
-    return ctx.reply(
-      `🔍 匿名码查询结果\n\n` +
-      `匿名码: ${data.nick}\n` +
-      `用户ID: ${userId}\n` +
-      `姓名: ${fullName || "无"}\n` +
-      `用户名: ${username}`
-    );
+    if (!foundUser) return ctx.reply("未找到该匿名码对应的用户");
+
+    const { userId, nick, user } = foundUser;
+    const fullName = `${user.first_name || ""} ${user.last_name || ""}`.trim();
+    const username = user.username ? '@' + user.username : "无用户名";
+
+    ctx.reply(`匿名码：${nick}\n用户ID：${userId}\n姓名：${fullName}\n用户名：${username}`);
   });
 });
 
