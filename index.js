@@ -327,3 +327,30 @@ app.listen(PORT, async () => {
     }
   }
 });
+
+// =====================
+// 机器人可用性检测
+// =====================
+async function checkBots() {
+  let aliveCount = 0;
+  for (const bot of bots) {
+    try {
+      const me = await bot.api.getMe();
+      console.log(`🤖 Bot 正常: ${me.username} (ID: ${me.id})`);
+      aliveCount++;
+    } catch (err) {
+      console.error(`❌ Bot 不可用: ${bot.token.slice(0, 10)}...`, err.message);
+    }
+  }
+
+  if (aliveCount === 0) {
+    console.error("🚨 所有 Bot 都不可用，程序即将退出！");
+    process.exit(1); // 强制退出进程，交给 Render/PM2/Docker 自动重启
+  }
+}
+
+// 启动时检测一次
+checkBots();
+
+// 每 10 分钟检测一次
+setInterval(checkBots, 10 * 60 * 1000);
