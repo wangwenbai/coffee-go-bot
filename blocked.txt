@@ -1,13 +1,7 @@
-scam
-fraud
 ripoff
 con
 phishing
 swindle
-hoax
-trick
-fake
-cheat
 complain
 services
 Something is wrong
@@ -43,7 +37,7 @@ deceptive
 deception
 dishonest
 untrue
-false
+FALSE
 false claim
 false information
 false advertising
@@ -124,3 +118,7 @@ job
 invest
 Untrustworthy
 There is a problem
+Unable to withdraw funds
+Withdrawal
+withdraw
+Unable to withdraw
