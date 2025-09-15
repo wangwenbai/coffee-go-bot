@@ -17,30 +17,30 @@ if (!BOT_TOKENS.length || !GROUP_ID || !process.env.RENDER_EXTERNAL_URL) {
 }
 
 // =====================
-// 多语言同义词库
+// 多语言 & 多语言近义词库
 // =====================
 const aliasMap = {
-  "scam": ["骗局","欺诈","诈骗","estafa","fraude","faux","мошенничество","احتيال"],
-  "fake": ["假货","伪造","falso","faux","подделка","fraude"],
-  "fraud": ["诈骗","欺骗","estafa","fraude","faux","мошенничество","احتيال"],
-  // 可以继续扩展更多屏蔽词
+  "scam": ["骗局","欺诈","诈骗","estafa","fraude","faux","мошенничество","احتيال","fraud","deception","trick","swindle","ripoff"],
+  "fake": ["假货","伪造","falso","faux","подделка","fraude","counterfeit","phony","bogus"],
+  "fraud": ["诈骗","欺骗","estafa","fraude","faux","мошенничество","احتيال","scam","deception","cheating"],
+  "deception": ["欺骗","诈骗","engaño","tromperie","обман","خداع","scam","fraud"],
 };
 
 // =====================
 // 屏蔽词热更新（仅在内容变化时）
 // =====================
 let blockedWordsRegex = null;
-let blockedWordsMap = new Map(); // 保存 regex 对应的原始词，方便日志
+let blockedWordsMap = new Map(); // 保存 regex 对应的原始词
 let lastBlockedContent = "";
 
 // 消息预处理（归一化）
 function normalizeText(text) {
   return text
     .toLowerCase()
-    .normalize("NFKC")                                      // Unicode归一化
-    .replace(/[\u0300-\u036f]/g, "")                        // 去重音
-    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "") // 去emoji
-    .replace(/(.)\1{2,}/g, "$1");                           // 压缩重复字符
+    .normalize("NFKC")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "")
+    .replace(/(.)\1{2,}/g, "$1");
 }
 
 // 将普通词扩展为更宽松的匹配规则
@@ -64,7 +64,7 @@ function buildFlexibleRegex(word) {
   return clean.split("").map(ch => (map[ch] || ch) + "[\\W_]*").join("");
 }
 
-// 扩展同义词
+// 扩展同义词（包括多语言近义词）
 function expandWithAliases(word) {
   const aliases = aliasMap[word.toLowerCase()] || [];
   return [word, ...aliases];
@@ -214,7 +214,7 @@ function markProcessed(msgKey) {
 }
 
 // =====================
-// 消息处理函数（私聊不转发）
+// 消息处理函数
 // =====================
 async function handleMessage(ctx) {
   const msg = ctx.message;
@@ -247,7 +247,6 @@ async function handleMessage(ctx) {
     const match = text.match(blockedWordsRegex);
     if (match) {
       hasBlockedWord = true;
-      // 查找匹配的原始词
       for (const [regexStr, original] of blockedWordsMap.entries()) {
         const r = new RegExp(regexStr, "i");
         if (r.test(text)) {
@@ -282,7 +281,6 @@ async function handleMessage(ctx) {
     return;
   }
 
-  // 正常消息删除 + 匿名转发
   try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch {}
 
   const forwardBot = getNextBot();
