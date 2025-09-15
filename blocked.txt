@@ -64,3 +64,6 @@ manipulation
 unfair
 untrustworthy
 unreliable
+No advance notice
+No advance notice.
+Advance notice.
