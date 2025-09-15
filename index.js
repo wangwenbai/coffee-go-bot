@@ -17,15 +17,64 @@ if (!BOT_TOKENS.length || !GROUP_ID || !process.env.RENDER_EXTERNAL_URL) {
 }
 
 // =====================
+// 多语言同义词库
+// =====================
+const aliasMap = {
+  "scam": ["骗局","欺诈","诈骗","estafa","fraude","faux","мошенничество","احتيال"],
+  "fake": ["假货","伪造","falso","faux","подделка","fraude"],
+  "fraud": ["诈骗","欺骗","estafa","fraude","faux","мошенничество","احتيال"],
+  // 可以继续扩展更多屏蔽词
+};
+
+// =====================
 // 屏蔽词热更新（仅在内容变化时）
 // =====================
 let blockedWordsRegex = null;
+let blockedWordsMap = new Map(); // 保存 regex 对应的原始词，方便日志
 let lastBlockedContent = "";
+
+// 消息预处理（归一化）
+function normalizeText(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFKC")                                      // Unicode归一化
+    .replace(/[\u0300-\u036f]/g, "")                        // 去重音
+    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "") // 去emoji
+    .replace(/(.)\1{2,}/g, "$1");                           // 压缩重复字符
+}
+
+// 将普通词扩展为更宽松的匹配规则
+function buildFlexibleRegex(word) {
+  const clean = word.toLowerCase().replace(/\s+/g, "");
+  const map = {
+    a: "[a@4]",
+    i: "[i1!|]",
+    l: "[l1!|]",
+    o: "[o0]",
+    s: "[s$5]",
+    e: "[e3]",
+    g: "[g9]",
+    t: "[t7+]",
+    f: "[fƒ]",
+    c: "[cç]",
+    r: "[r®]",
+    u: "[uü]",
+    d: "[dð]",
+  };
+  return clean.split("").map(ch => (map[ch] || ch) + "[\\W_]*").join("");
+}
+
+// 扩展同义词
+function expandWithAliases(word) {
+  const aliases = aliasMap[word.toLowerCase()] || [];
+  return [word, ...aliases];
+}
 
 function loadBlockedWords() {
   if (!fs.existsSync("./blocked.txt")) {
     if (blockedWordsRegex !== null) {
       blockedWordsRegex = null;
+      blockedWordsMap.clear();
       lastBlockedContent = "";
       console.log("⚠️ blocked.txt 不存在，屏蔽词清空");
     }
@@ -33,16 +82,24 @@ function loadBlockedWords() {
   }
 
   const content = fs.readFileSync("./blocked.txt", "utf-8").trim();
-  if (content === lastBlockedContent) return; // 内容未变，不更新
+  if (content === lastBlockedContent) return;
 
   const words = content
     .split(/\r?\n/)
     .map(w => w.trim())
     .filter(Boolean);
 
-  blockedWordsRegex = words.length ? new RegExp(words.join("|"), "i") : null;
+  const expandedWords = words.flatMap(expandWithAliases);
+  blockedWordsMap.clear();
+  const regexParts = expandedWords.map(word => {
+    const regexStr = buildFlexibleRegex(word);
+    blockedWordsMap.set(regexStr, word);
+    return regexStr;
+  });
+
+  blockedWordsRegex = regexParts.length ? new RegExp(regexParts.join("|"), "i") : null;
   lastBlockedContent = content;
-  console.log("✅ 屏蔽词已更新:", words.length, "条");
+  console.log("✅ 屏蔽词已更新:", words.length, "条 (扩展后共", expandedWords.length, "个匹配项)");
 }
 
 // 启动时加载一次
@@ -180,9 +237,27 @@ async function handleMessage(ctx) {
 
   if (adminIds.has(userId)) return;
 
-  const text = msg.text || msg.caption || "";
+  const textRaw = msg.text || msg.caption || "";
+  const text = normalizeText(textRaw);
   const hasLinkOrMention = /\bhttps?:\/\/\S+|\@\w+/i.test(text);
-  const hasBlockedWord = blockedWordsRegex && blockedWordsRegex.test(text);
+
+  let hasBlockedWord = false;
+  let triggeredWord = null;
+  if (blockedWordsRegex) {
+    const match = text.match(blockedWordsRegex);
+    if (match) {
+      hasBlockedWord = true;
+      // 查找匹配的原始词
+      for (const [regexStr, original] of blockedWordsMap.entries()) {
+        const r = new RegExp(regexStr, "i");
+        if (r.test(text)) {
+          triggeredWord = original;
+          break;
+        }
+      }
+      console.log(`⚠️ 消息触发屏蔽词: "${triggeredWord}" | 用户ID: ${userId} | 内容: ${textRaw}`);
+    }
+  }
 
   if (hasLinkOrMention || hasBlockedWord) {
     try { await ctx.api.deleteMessage(ctx.chat.id, msg.message_id); } catch {}
@@ -198,7 +273,7 @@ async function handleMessage(ctx) {
           .text("❌ 拒绝", `reject_${reviewId}`);
         const m = await ctx.api.sendMessage(
           adminId,
-          `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${text}`,
+          `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${textRaw}`,
           { reply_markup: kb }
         ).catch(() => {});
         if (m && m.message_id) adminMsgIds.push(m.message_id);
@@ -268,7 +343,7 @@ bots.forEach(bot => {
   bot.command("info_code", async ctx => {
     const fromId = ctx.from?.id;
     if (!fromId) return;
-    if (!adminIds.has(fromId)) return; // 非管理员不响应
+    if (!adminIds.has(fromId)) return;
 
     const args = ctx.message.text.trim().split(/\s+/);
     if (args.length < 2) return ctx.reply("请输入匿名码，例如：/info_code #AB12").catch(() => {});
@@ -345,7 +420,7 @@ async function checkBots() {
 
   if (aliveCount === 0) {
     console.error("🚨 所有 Bot 都不可用，程序即将退出！");
-    process.exit(1); // 强制退出进程，交给 Render/PM2/Docker 自动重启
+    process.exit(1);
   }
 }
 
