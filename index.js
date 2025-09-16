@@ -272,7 +272,8 @@ async function handleMessage(ctx) {
           .text("❌ 拒绝", `reject_${reviewId}`);
         const m = await ctx.api.sendMessage(
           adminId,
-          `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n\n内容: ${textRaw}`,
+          // ✅ 这里插入匿名码
+          `⚠️ 用户违规消息待审核\n\n👤 用户: ${fullName} (${msg.from.username ? '@'+msg.from.username : '无用户名'})\n🆔 ID: ${msg.from.id}\n🔑 匿名码: ${nick}\n\n内容: ${textRaw}`,
           { reply_markup: kb }
         ).catch(() => {});
         if (m && m.message_id) adminMsgIds.push(m.message_id);
