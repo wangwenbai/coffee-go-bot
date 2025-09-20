@@ -119,6 +119,7 @@ invest
 Untrustworthy
 There is a problem
 Unable to withdraw funds
+অনুমোদিত নয়
 Withdrawal
 withdraw
 Unable to withdraw
