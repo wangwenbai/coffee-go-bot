@@ -119,7 +119,12 @@ invest
 Untrustworthy
 There is a problem
 Unable to withdraw funds
-অনুমোদিত নয়
 Withdrawal
 withdraw
 Unable to withdraw
+অনুমোদিত নয়
+Unable to complete the task
+Can't do homework
+cannot
+Can't
+Unable
